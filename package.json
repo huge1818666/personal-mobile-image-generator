@@ -5,8 +5,5 @@
   "scripts": {
     "start": "node ./server.mjs",
     "check": "node --check ./server.mjs && node --check ./image-api.mjs && node --check ./public/app.js"
-  },
-  "dependencies": {
-    "heic-convert": "^2.1.0"
   }
 }

@@ -37,7 +37,7 @@ const MAX_JOBS = 30;
 const MAX_UPLOADS = 80;
 const MAX_CONCURRENT_JOBS = clampInteger(process.env.IMAGE_MAX_CONCURRENT_JOBS, 1, 1, 4);
 const APP_VERSION = 'personal-v0.1.0';
-const WEB_VERSION = 'web-v0.1.5';
+const WEB_VERSION = 'web-v0.1.6';
 
 const sessions = new Map();
 const pendingJobOptions = new Map();
@@ -1342,43 +1342,61 @@ function convertHeicFileInChild(config) {
 }
 
 const HEIC_CONVERT_CHILD_SCRIPT = `
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { readFile, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 
 const config = JSON.parse(process.env.HEIC_CONVERT_CONFIG || '{}');
 const expectedSize = Number(config.expectedSize || 0);
-let inputBuffer;
+const inputPath = config.inputPath || path.join(config.chunkDir, 'input.heic');
 
 if (config.chunkDir) {
   const total = Number(config.total || 0);
-  const chunks = [];
+  const stream = createWriteStream(inputPath);
   let receivedSize = 0;
-  for (let index = 0; index < total; index += 1) {
-    const chunk = await readFile(path.join(config.chunkDir, \`\${String(index).padStart(6, '0')}.part\`));
-    receivedSize += chunk.length;
-    chunks.push(chunk);
+  try {
+    for (let index = 0; index < total; index += 1) {
+      const chunk = await readFile(path.join(config.chunkDir, \`\${String(index).padStart(6, '0')}.part\`));
+      receivedSize += chunk.length;
+      if (!stream.write(chunk)) await once(stream, 'drain');
+    }
+    stream.end();
+    await once(stream, 'finish');
+  } catch (error) {
+    stream.destroy();
+    throw error;
   }
   if (receivedSize !== expectedSize) {
     throw new Error('上传图片大小校验失败，请重新选择图片。');
   }
-  inputBuffer = Buffer.concat(chunks, receivedSize);
 } else {
   const fileStats = await stat(config.inputPath);
   if (fileStats.size !== expectedSize) {
     throw new Error('上传图片大小校验失败，请重新选择图片。');
   }
-  inputBuffer = await readFile(config.inputPath);
 }
 
-const imported = await import('heic-convert');
-const convert = imported.default || imported;
-const output = Buffer.from(await convert({
-  buffer: inputBuffer,
-  format: 'JPEG',
-  quality: 0.88,
-}));
-await writeFile(config.outputPath, output);
-process.stdout.write(JSON.stringify({ size: output.length }));
+const binary = process.env.HEIF_CONVERT_BINARY || 'heif-convert';
+const child = spawn(binary, ['-q', '88', inputPath, config.outputPath], {
+  stdio: ['ignore', 'ignore', 'pipe'],
+});
+let stderr = '';
+child.stderr.setEncoding('utf8');
+child.stderr.on('data', (chunk) => {
+  stderr += chunk;
+});
+const [code, signal] = await once(child, 'close');
+if (code !== 0) {
+  throw new Error(stderr.trim() || \`heif-convert 退出异常：\${signal || code}\`);
+}
+
+if (config.chunkDir) {
+  await unlink(inputPath).catch(() => {});
+}
+const outputStats = await stat(config.outputPath);
+process.stdout.write(JSON.stringify({ size: outputStats.size }));
 `;
 
 function replaceImageExtension(fileName, extension) {
