@@ -37,7 +37,7 @@ const MAX_JOBS = 30;
 const MAX_UPLOADS = 80;
 const MAX_CONCURRENT_JOBS = clampInteger(process.env.IMAGE_MAX_CONCURRENT_JOBS, 1, 1, 4);
 const APP_VERSION = 'personal-v0.1.0';
-const WEB_VERSION = 'web-v0.1.3';
+const WEB_VERSION = 'web-v0.1.4';
 
 const sessions = new Map();
 const pendingJobOptions = new Map();
@@ -904,21 +904,8 @@ async function completeChunkedBaseUpload(chunkUploadId, body, session) {
     throw Object.assign(new Error('上传分片数量不正确，请重新选择图片。'), { statusCode: 400 });
   }
 
-  const chunks = [];
-  for (let index = 0; index < total; index += 1) {
-    try {
-      chunks.push(await readFile(path.join(resolveChunkUploadDir(chunkUploadId), `${String(index).padStart(6, '0')}.part`)));
-    } catch {
-      throw Object.assign(new Error('上传分片不完整，请重新选择图片。'), { statusCode: 400 });
-    }
-  }
-
-  const inputBuffer = Buffer.concat(chunks);
-  if (inputBuffer.length !== Number(meta.size || 0)) {
-    throw Object.assign(new Error('上传图片大小校验失败，请重新选择图片。'), { statusCode: 400 });
-  }
-
   if (isHeicMimeType(meta.mimeType)) {
+    await assertChunkedUploadComplete(chunkUploadId, total, Number(meta.size || 0));
     const record = {
       createdAt: new Date().toISOString(),
       error: '',
@@ -930,7 +917,7 @@ async function completeChunkedBaseUpload(chunkUploadId, body, session) {
     };
     pendingUploadConversions.set(record.id, record);
     setImmediate(() => {
-      processChunkedBaseUploadConversion(record, inputBuffer, meta, session).catch((error) => {
+      processChunkedBaseUploadConversion(record, meta, session, total).catch((error) => {
         record.error = error.message || 'HEIC/HEIF 底图转换失败。';
         record.status = 'error';
         scheduleUploadConversionCleanup(record.id);
@@ -943,6 +930,7 @@ async function completeChunkedBaseUpload(chunkUploadId, body, session) {
     };
   }
 
+  const inputBuffer = await readChunkedUploadBuffer(chunkUploadId, total, Number(meta.size || 0));
   try {
     const upload = await storeBaseUploadFromBuffer(inputBuffer, meta.mimeType, meta.fileName, session);
     await rm(resolveChunkUploadDir(chunkUploadId), { force: true, recursive: true });
@@ -953,8 +941,9 @@ async function completeChunkedBaseUpload(chunkUploadId, body, session) {
   }
 }
 
-async function processChunkedBaseUploadConversion(record, inputBuffer, meta, session) {
+async function processChunkedBaseUploadConversion(record, meta, session, total) {
   try {
+    const inputBuffer = await readChunkedUploadBuffer(record.id, total, Number(meta.size || 0));
     const upload = await storeBaseUploadFromBuffer(inputBuffer, meta.mimeType, meta.fileName, session);
     await rm(resolveChunkUploadDir(record.id), { force: true, recursive: true });
     record.upload = upload;
@@ -986,6 +975,40 @@ function scheduleUploadConversionCleanup(conversionId) {
     pendingUploadConversions.delete(conversionId);
   }, 30 * 60 * 1000);
   timer.unref?.();
+}
+
+async function assertChunkedUploadComplete(chunkUploadId, total, expectedSize) {
+  let receivedSize = 0;
+  for (let index = 0; index < total; index += 1) {
+    try {
+      const fileStats = await stat(path.join(resolveChunkUploadDir(chunkUploadId), `${String(index).padStart(6, '0')}.part`));
+      if (!fileStats.isFile()) throw new Error('Not a file');
+      receivedSize += fileStats.size;
+    } catch {
+      throw Object.assign(new Error('上传分片不完整，请重新选择图片。'), { statusCode: 400 });
+    }
+  }
+  if (receivedSize !== expectedSize) {
+    throw Object.assign(new Error('上传图片大小校验失败，请重新选择图片。'), { statusCode: 400 });
+  }
+}
+
+async function readChunkedUploadBuffer(chunkUploadId, total, expectedSize) {
+  const chunks = [];
+  let receivedSize = 0;
+  for (let index = 0; index < total; index += 1) {
+    try {
+      const chunk = await readFile(path.join(resolveChunkUploadDir(chunkUploadId), `${String(index).padStart(6, '0')}.part`));
+      receivedSize += chunk.length;
+      chunks.push(chunk);
+    } catch {
+      throw Object.assign(new Error('上传分片不完整，请重新选择图片。'), { statusCode: 400 });
+    }
+  }
+  if (receivedSize !== expectedSize) {
+    throw Object.assign(new Error('上传图片大小校验失败，请重新选择图片。'), { statusCode: 400 });
+  }
+  return Buffer.concat(chunks, receivedSize);
 }
 
 async function storeBaseUploadFromBuffer(inputBuffer, mimeType, originalFileName, session) {

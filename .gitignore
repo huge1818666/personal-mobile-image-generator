@@ -8,6 +8,8 @@ node_modules/
 
 # Runtime data
 .personal-data.json
+base-upload-chunks/
+base-uploads/
 image-*.png
 image-*.jpg
 image-*.jpeg

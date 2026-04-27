@@ -27,6 +27,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve image version
+        id: version
+        run: |
+          WEB_VERSION="$(node -e "const fs=require('fs'); const m=fs.readFileSync('server.mjs','utf8').match(/const WEB_VERSION = '([^']+)'/); if (!m) process.exit(1); process.stdout.write(m[1]);")"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          IMAGE_VERSION="${WEB_VERSION}-${SHORT_SHA}"
+          echo "web_version=${WEB_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "image_version=${IMAGE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved image version: ${IMAGE_VERSION}"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -34,16 +44,20 @@ jobs:
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/personal-mobile-image-generator:latest
+            ghcr.io/${{ github.repository_owner }}/personal-mobile-image-generator:${{ steps.version.outputs.web_version }}
             ghcr.io/${{ github.repository_owner }}/personal-mobile-image-generator:${{ github.sha }}
 
       - name: Build offline Docker archive
         run: |
+          ARCHIVE_NAME="personal-mobile-image-generator-${{ steps.version.outputs.image_version }}-amd64.tar"
           docker buildx build \
             --platform linux/amd64 \
             --tag personal-mobile-image-generator:latest \
-            --output type=docker,dest=/tmp/personal-mobile-image-generator-amd64.tar \
+            --output "type=docker,dest=/tmp/${ARCHIVE_NAME}" \
             .
-          gzip -9 /tmp/personal-mobile-image-generator-amd64.tar
+          gzip -9 "/tmp/${ARCHIVE_NAME}"
+          cp "/tmp/${ARCHIVE_NAME}.gz" /tmp/personal-mobile-image-generator-amd64.tar.gz
+          echo "OFFLINE_ARCHIVE=/tmp/${ARCHIVE_NAME}.gz" >> "$GITHUB_ENV"
 
       - name: Publish offline download
         env:
@@ -52,4 +66,4 @@ jobs:
           gh release view offline-latest >/dev/null 2>&1 || gh release create offline-latest \
             --title "Offline Docker image" \
             --notes "离线 Docker 镜像包。下载后可用 docker load 导入。"
-          gh release upload offline-latest /tmp/personal-mobile-image-generator-amd64.tar.gz --clobber
+          gh release upload offline-latest "$OFFLINE_ARCHIVE" /tmp/personal-mobile-image-generator-amd64.tar.gz --clobber

@@ -1026,7 +1026,7 @@ function showLoginStatus(message, type) {
 
 function formatVersionLabel(info) {
   const app = info?.version || info?.appVersion || 'personal-v0.1.0';
-  const web = info?.webVersion || 'web-v0.1.3';
+  const web = info?.webVersion || 'web-v0.1.4';
   return `${app} · ${web}`;
 }
 
