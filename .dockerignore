@@ -1,0 +1,12 @@
+.DS_Store
+.env
+.env.local
+.personal-data.json
+image-*.png
+image-*.jpg
+image-*.jpeg
+image-*.webp
+node_modules/
+tmp/
+temp/
+*.log

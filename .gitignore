@@ -1,0 +1,19 @@
+.DS_Store
+node_modules/
+
+# Local secrets and environment overrides
+.env
+.env.local
+*.local
+
+# Runtime data
+.personal-data.json
+image-*.png
+image-*.jpg
+image-*.jpeg
+image-*.webp
+
+# Local logs and temp files
+*.log
+tmp/
+temp/

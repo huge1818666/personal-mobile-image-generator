@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>个人图片生成手机版</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main id="loginView" class="login-view" hidden>
+    <section class="panel login-panel">
+      <p class="kicker">Personal Image Tool</p>
+      <h1>个人图片生成</h1>
+      <p class="subtle">登录后在手机上快速生成、修改和下载图片。</p>
+      <form id="loginForm" class="stack-form">
+        <label>
+          <span>账号</span>
+          <input id="loginUsername" name="username" type="text" autocomplete="username" required>
+        </label>
+        <label>
+          <span>密码</span>
+          <input id="loginPassword" name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <button id="loginButton" type="submit">登录</button>
+        <p id="loginStatus" class="notice">等待登录。</p>
+      </form>
+    </section>
+  </main>
+
+  <main id="appView" class="app-view" hidden>
+    <header class="app-header">
+      <div>
+        <p class="kicker">个人版</p>
+        <h1>图片生成</h1>
+      </div>
+      <button id="logoutButton" type="button" class="soft-button">退出</button>
+    </header>
+
+    <section class="identity-strip">
+      <span id="currentUser">-</span>
+      <span id="appVersion">personal-v0.1.0</span>
+    </section>
+
+    <form id="generateForm" class="panel composer">
+      <label class="prompt-block">
+        <span>提示词</span>
+        <textarea id="prompt" rows="8" placeholder="写清楚画面主体、场景、文字、风格和用途。上传底图后，可以写“保留主体，换成更干净的背景”。" required></textarea>
+      </label>
+      <div id="promptMeta" class="prompt-meta">
+        <span id="promptRule">从 0 生成至少 30 个字。</span>
+        <button id="clearPromptButton" type="button" class="link-button">清空</button>
+      </div>
+
+      <div id="promptExamples" class="example-strip" aria-label="提示词案例"></div>
+
+      <section class="upload-section">
+        <div class="section-head">
+          <div>
+            <h2>底图</h2>
+            <p id="baseImageInfo">未选择底图，当前会直接生成新图片。</p>
+          </div>
+          <button id="clearBaseButton" type="button" class="soft-button small" disabled>清除</button>
+        </div>
+        <label class="upload-button">
+          <input id="baseImageFile" type="file" accept="image/png,image/jpeg,image/webp" multiple>
+          <span>上传图片</span>
+        </label>
+        <div id="baseImageList" class="base-image-list" hidden></div>
+      </section>
+
+      <section class="quick-settings">
+        <div class="section-head">
+          <div>
+            <h2>比例</h2>
+            <p>默认自动，需要固定比例时再手动选择。</p>
+          </div>
+        </div>
+        <div id="sizeOptions" class="segmented-options"></div>
+      </section>
+
+      <details class="settings-panel">
+        <summary>更多设置</summary>
+        <div class="settings-grid">
+          <label>
+            <span>质量</span>
+            <select id="quality">
+              <option value="default">默认质量</option>
+              <option value="low">低质量</option>
+              <option value="medium">中等质量</option>
+              <option value="high">高质量</option>
+            </select>
+          </label>
+          <label>
+            <span>格式</span>
+            <select id="outputFormat">
+              <option value="png">PNG</option>
+              <option value="jpeg">JPG</option>
+              <option value="webp">WebP</option>
+            </select>
+          </label>
+          <label>
+            <span>压缩</span>
+            <input id="outputCompression" type="number" min="0" max="100" step="1" value="100">
+          </label>
+          <label data-admin-api-setting>
+            <span>API Key</span>
+            <input id="apiKey" type="password" autocomplete="off" placeholder="留空则使用环境变量">
+          </label>
+          <label data-admin-api-setting>
+            <span>接口地址</span>
+            <input id="baseUrl" type="url" value="https://newapi.768696.xyz">
+          </label>
+          <label data-admin-api-setting>
+            <span>模型</span>
+            <input id="model" type="text" value="gpt-image-2">
+          </label>
+        </div>
+      </details>
+
+      <p id="statusBox" class="notice" hidden></p>
+
+      <div class="sticky-submit">
+        <button id="generateButton" type="submit">生成图片</button>
+        <span id="costNote">预计消耗 0.2 元</span>
+      </div>
+    </form>
+
+    <section class="panel result-section">
+      <div class="section-head">
+        <div>
+          <h2>结果</h2>
+          <p id="resultMeta">生成后会显示在这里。</p>
+        </div>
+      </div>
+      <div id="preview" class="preview-box">
+        <span>等待生成</span>
+      </div>
+      <div class="result-actions">
+        <a id="downloadButton" class="soft-button disabled" aria-disabled="true">下载</a>
+        <button id="useResultAsBaseButton" type="button" class="soft-button" disabled>作底图</button>
+      </div>
+    </section>
+
+    <section class="panel list-section">
+      <div class="section-head">
+        <div>
+          <h2>图片任务</h2>
+          <p>最近 30 条任务。</p>
+        </div>
+        <button id="refreshJobsButton" type="button" class="soft-button small">刷新</button>
+      </div>
+      <div id="jobList" class="job-list"></div>
+    </section>
+
+    <section class="panel list-section">
+      <div class="section-head">
+        <div>
+          <h2>最近图片</h2>
+          <p>当前项目最近保存的图片。</p>
+        </div>
+        <button id="refreshImagesButton" type="button" class="soft-button small">刷新</button>
+      </div>
+      <div id="imageList" class="image-list"></div>
+    </section>
+
+    <section id="adminPanel" class="panel admin-section" hidden>
+      <div class="section-head">
+        <div>
+          <h2>用户管理</h2>
+          <p>管理员可以新增和修改用户账号。</p>
+        </div>
+        <button id="refreshUsersButton" type="button" class="soft-button small">刷新</button>
+      </div>
+
+      <form id="userForm" class="user-form">
+        <input id="managedUserId" type="hidden">
+        <div class="section-head compact-head">
+          <h3 id="userFormTitle">新增用户</h3>
+          <button id="cancelUserEditButton" type="button" class="link-button" hidden>取消修改</button>
+        </div>
+        <label>
+          <span>账号</span>
+          <input id="managedUsername" type="text" autocomplete="off" required>
+        </label>
+        <label>
+          <span>密码</span>
+          <input id="managedPassword" type="password" autocomplete="new-password" placeholder="至少 6 位密码">
+        </label>
+        <div class="user-form-row">
+          <label>
+            <span>角色</span>
+            <select id="managedRole">
+              <option value="user">普通用户</option>
+              <option value="admin">管理员</option>
+            </select>
+          </label>
+          <label class="switch-row">
+            <input id="managedActive" type="checkbox" checked>
+            <span>启用</span>
+          </label>
+        </div>
+        <button id="saveUserButton" type="submit">保存用户</button>
+        <p id="userStatus" class="notice" hidden></p>
+      </form>
+
+      <div id="userList" class="user-list"></div>
+    </section>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

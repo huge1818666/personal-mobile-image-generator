@@ -1,0 +1,9 @@
+{
+  "name": "personal-mobile-image-generator",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node ./server.mjs",
+    "check": "node --check ./server.mjs && node --check ./image-api.mjs && node --check ./public/app.js"
+  }
+}
