@@ -21,14 +21,17 @@ const APP_PASSWORD = process.env.APP_PASSWORD || 'personal123456';
 const ROOT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
 const DATA_FILE = path.join(PROJECT_DIR, '.personal-data.json');
+const UPLOAD_DIR = path.join(PROJECT_DIR, 'base-uploads');
 const SESSION_COOKIE = 'personal_image_session';
 const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
 const SESSION_MAX_AGE_MS = SESSION_MAX_AGE_SECONDS * 1000;
 const ENV_ADMIN_ID = 'env-admin';
 const MAX_JSON_BYTES = 70 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const MAX_BASE_IMAGES = 4;
 const MAX_IMAGES = 30;
 const MAX_JOBS = 30;
+const MAX_UPLOADS = 80;
 const MAX_CONCURRENT_JOBS = clampInteger(process.env.IMAGE_MAX_CONCURRENT_JOBS, 1, 1, 4);
 const APP_VERSION = 'personal-v0.1.0';
 
@@ -137,6 +140,21 @@ const server = http.createServer(async (request, response) => {
       return sendJson(response, 200, { images: getVisibleImages(data.images, session).slice(0, MAX_IMAGES) });
     }
 
+    if (request.method === 'POST' && requestUrl.pathname === '/api/uploads') {
+      const upload = await createBaseUpload(request, session);
+      return sendJson(response, 201, { upload });
+    }
+
+    if (request.method === 'GET' && requestUrl.pathname.startsWith('/api/uploads/')) {
+      const uploadId = decodeURIComponent(requestUrl.pathname.slice('/api/uploads/'.length).replace(/\/file$/, ''));
+      if (!requestUrl.pathname.endsWith('/file')) {
+        return sendJson(response, 404, { error: 'Not found' });
+      }
+      const upload = await getAccessibleUpload(uploadId, session);
+      if (!upload) return sendJson(response, 404, { error: '上传图片不存在或已清理。' });
+      return sendFile(response, path.join(UPLOAD_DIR, path.basename(upload.fileName)));
+    }
+
     if (request.method === 'POST' && requestUrl.pathname === '/api/generate') {
       const body = await readJson(request);
       assertImageSettingsAvailable(session, body);
@@ -168,7 +186,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'POST' && requestUrl.pathname === '/api/edit') {
       const body = await readJson(request);
       assertImageSettingsAvailable(session, body);
-      const baseImages = await readBaseImagesFromRequest(body);
+      const baseImages = await readBaseImagesFromRequest(body, session);
       const job = await createImageJob({
         baseImages,
         mode: 'edit',
@@ -767,7 +785,105 @@ function sanitizeJobBaseImages(baseImages = []) {
   }));
 }
 
-async function readBaseImagesFromRequest(body) {
+async function createBaseUpload(request, session) {
+  const rawMimeType = String(request.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  const mimeType = normalizeUploadedMimeType(rawMimeType, request.headers['x-file-name']);
+  const inputBuffer = await readRequestBuffer(request, MAX_UPLOAD_BYTES, '上传底图不能超过 25MB。');
+  if (!inputBuffer.length) {
+    throw Object.assign(new Error('上传底图内容为空。'), { statusCode: 400 });
+  }
+
+  const originalFileName = decodeHeaderValue(request.headers['x-file-name']) || `upload-${Date.now()}${extensionForImageMimeType(mimeType)}`;
+  let fileBuffer = inputBuffer;
+  let fileMimeType = mimeType;
+  let fileName = path.basename(originalFileName);
+
+  if (mimeType === 'image/heic' || mimeType === 'image/heif') {
+    const converted = await convertHeicToJpeg(inputBuffer, originalFileName);
+    fileBuffer = converted.buffer;
+    fileMimeType = converted.mimeType;
+    fileName = converted.fileName;
+  }
+
+  const uploadId = randomBytes(10).toString('hex');
+  const storedFileName = `base-${uploadId}${extensionForImageMimeType(fileMimeType)}`;
+  await mkdir(UPLOAD_DIR, { recursive: true });
+  await writeFile(path.join(UPLOAD_DIR, storedFileName), fileBuffer);
+
+  const upload = await rememberBaseUpload({
+    fileName: storedFileName,
+    id: uploadId,
+    mimeType: fileMimeType,
+    originalFileName: fileName,
+    ownerUserId: session?.userId || '',
+    ownerUsername: session?.username || '',
+    size: fileBuffer.length,
+  });
+  return sanitizeUpload(upload);
+}
+
+async function rememberBaseUpload(upload) {
+  return mutateData(async (data) => {
+    const now = new Date().toISOString();
+    const record = {
+      ...upload,
+      createdAt: now,
+    };
+    data.uploads.unshift(record);
+    const removed = data.uploads.slice(MAX_UPLOADS);
+    data.uploads = data.uploads.slice(0, MAX_UPLOADS);
+    await removeUploads(removed);
+    return record;
+  });
+}
+
+async function getAccessibleUpload(uploadId, session) {
+  const data = await readData();
+  const upload = data.uploads.find((item) => item.id === uploadId);
+  if (!upload || !canAccessOwnedItem(upload, session)) return null;
+  return upload;
+}
+
+function sanitizeUpload(upload) {
+  return {
+    createdAt: upload.createdAt || '',
+    fileName: upload.fileName || '',
+    id: upload.id || '',
+    imageUrl: `/api/uploads/${encodeURIComponent(upload.id || '')}/file`,
+    mimeType: upload.mimeType || '',
+    originalFileName: upload.originalFileName || '',
+    size: upload.size || 0,
+  };
+}
+
+function normalizeUploadedMimeType(mimeType, fileName) {
+  const normalized = String(mimeType || '').trim().toLowerCase().replace('image/jpg', 'image/jpeg');
+  if (['image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif'].includes(normalized)) {
+    return normalized;
+  }
+
+  const extension = path.extname(decodeHeaderValue(fileName)).toLowerCase();
+  const fromExtension = {
+    '.heic': 'image/heic',
+    '.heif': 'image/heif',
+    '.jpeg': 'image/jpeg',
+    '.jpg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+  }[extension];
+  if (fromExtension) return fromExtension;
+  throw Object.assign(new Error('上传底图只支持 PNG、JPG/JPEG、WEBP、HEIC/HEIF 格式。'), { statusCode: 400 });
+}
+
+function decodeHeaderValue(value) {
+  try {
+    return decodeURIComponent(String(value || '').trim());
+  } catch {
+    return String(value || '').trim();
+  }
+}
+
+async function readBaseImagesFromRequest(body, session) {
   const inputs = Array.isArray(body.baseImages) ? body.baseImages : [];
   if (!inputs.length) {
     throw Object.assign(new Error('请先上传底图。'), { statusCode: 400 });
@@ -778,6 +894,22 @@ async function readBaseImagesFromRequest(body) {
 
   const baseImages = [];
   for (const input of inputs) {
+    if (input.baseUploadId) {
+      const upload = await getAccessibleUpload(String(input.baseUploadId), session);
+      if (!upload) throw Object.assign(new Error('上传底图不存在或已清理，请重新选择。'), { statusCode: 404 });
+      const filePath = path.join(UPLOAD_DIR, path.basename(upload.fileName));
+      const fileStats = await stat(filePath);
+      baseImages.push({
+        buffer: await readFile(filePath),
+        fileName: upload.originalFileName || upload.fileName,
+        kind: 'upload',
+        label: normalizeBaseImageLabel(input.baseImageLabel, baseImages.length),
+        mimeType: upload.mimeType,
+        role: normalizeBaseImageRole(input.baseImageRole, baseImages.length === 0 ? 'target' : 'reference'),
+        size: fileStats.size,
+      });
+      continue;
+    }
     if (input.baseFileName) {
       const filePath = await resolveGeneratedImagePath(input.baseFileName);
       const fileStats = await stat(filePath);
@@ -909,11 +1041,12 @@ async function readData() {
   try {
     data = JSON.parse(await readFile(DATA_FILE, 'utf8'));
   } catch {
-    data = { images: [], jobs: [], sessions: [], users: [] };
+    data = { images: [], jobs: [], sessions: [], uploads: [], users: [] };
   }
   if (!Array.isArray(data.images)) data.images = [];
   if (!Array.isArray(data.jobs)) data.jobs = [];
   if (!Array.isArray(data.sessions)) data.sessions = [];
+  if (!Array.isArray(data.uploads)) data.uploads = [];
   if (!Array.isArray(data.users)) data.users = [];
   data.sessions = data.sessions
     .filter((session) => session && session.id && session.username)
@@ -924,6 +1057,18 @@ async function readData() {
       role: normalizeUserRole(session.role),
       userId: String(session.userId || ''),
       username: String(session.username || ''),
+    }));
+  data.uploads = data.uploads
+    .filter((upload) => upload && upload.id && upload.fileName)
+    .map((upload) => ({
+      createdAt: upload.createdAt || '',
+      fileName: String(upload.fileName || ''),
+      id: String(upload.id || ''),
+      mimeType: normalizeUploadedMimeType(upload.mimeType, upload.fileName),
+      originalFileName: String(upload.originalFileName || upload.fileName || ''),
+      ownerUserId: String(upload.ownerUserId || ''),
+      ownerUsername: String(upload.ownerUsername || ''),
+      size: Number(upload.size || 0),
     }));
   data.users = data.users
     .filter((user) => user && user.id && user.username && user.passwordHash)
@@ -945,6 +1090,7 @@ async function writeData(data) {
     images: data.images.slice(0, MAX_IMAGES),
     jobs: data.jobs.slice(0, MAX_JOBS),
     sessions: data.sessions || [],
+    uploads: (data.uploads || []).slice(0, MAX_UPLOADS),
     users: data.users,
   }, null, 2));
 }
@@ -965,6 +1111,17 @@ async function removeImages(images) {
     if (!image.fileName || !/^image-/.test(image.fileName)) continue;
     try {
       await unlink(path.join(PROJECT_DIR, path.basename(image.fileName)));
+    } catch {
+      // Best-effort cleanup.
+    }
+  }
+}
+
+async function removeUploads(uploads) {
+  for (const upload of uploads) {
+    if (!upload.fileName) continue;
+    try {
+      await unlink(path.join(UPLOAD_DIR, path.basename(upload.fileName)));
     } catch {
       // Best-effort cleanup.
     }
@@ -994,21 +1151,26 @@ function getCookie(request, name) {
 }
 
 async function readJson(request) {
+  const buffer = await readRequestBuffer(request, MAX_JSON_BYTES, '上传内容太大，请使用总计 60MB 以内的图片。');
+  if (!buffer.length) return {};
+  try {
+    return JSON.parse(buffer.toString('utf8'));
+  } catch {
+    throw Object.assign(new Error('请求 JSON 格式不正确。'), { statusCode: 400 });
+  }
+}
+
+async function readRequestBuffer(request, maxBytes, overflowMessage) {
   const chunks = [];
   let totalBytes = 0;
   for await (const chunk of request) {
     totalBytes += chunk.length;
-    if (totalBytes > MAX_JSON_BYTES) {
-      throw Object.assign(new Error('上传内容太大，请使用总计 60MB 以内的图片。'), { statusCode: 413 });
+    if (totalBytes > maxBytes) {
+      throw Object.assign(new Error(overflowMessage), { statusCode: 413 });
     }
     chunks.push(chunk);
   }
-  if (!chunks.length) return {};
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-  } catch {
-    throw Object.assign(new Error('请求 JSON 格式不正确。'), { statusCode: 400 });
-  }
+  return chunks.length ? Buffer.concat(chunks) : Buffer.alloc(0);
 }
 
 function sendJson(response, statusCode, payload, headers = {}) {

@@ -456,19 +456,21 @@ async function addIncomingFiles(files) {
     throw new Error(`最多只能使用 ${maxImages} 张底图。`);
   }
   const uploaded = [];
+  showStatus('正在上传并处理底图...', '');
   for (const file of files) {
     const mimeType = getSupportedImageMimeType(file);
     if (!mimeType) {
       throw new Error('上传底图只支持 PNG、JPG/JPEG、WEBP、HEIC/HEIF 格式。');
     }
     const preparedImage = await prepareUploadedImage(file, mimeType);
+    const { upload } = await uploadBaseImage(preparedImage);
     uploaded.push({
-      dataUrl: preparedImage.dataUrl,
-      fileName: preparedImage.fileName,
-      imageUrl: preparedImage.imageUrl,
+      fileName: upload.originalFileName || preparedImage.fileName,
+      imageUrl: upload.imageUrl || '',
       kind: 'upload',
       role: baseImages.some((image) => image.role === 'target') ? 'reference' : 'target',
-      size: preparedImage.size,
+      size: upload.size || preparedImage.blob.size,
+      uploadId: upload.id,
     });
   }
   baseImages = [...baseImages, ...uploaded];
@@ -541,10 +543,17 @@ function serializeBaseImages() {
           baseImageRole: image.role || 'target',
         };
       }
+      if (image.uploadId) {
+        return {
+          baseUploadId: image.uploadId,
+          baseImageLabel,
+          baseImageRole: image.role || 'target',
+        };
+      }
       return {
         baseImageData: image.dataUrl,
-        baseImageLabel,
         baseImageName: image.fileName,
+        baseImageLabel,
         baseImageRole: image.role || 'target',
       };
     }),
@@ -574,13 +583,9 @@ function getSupportedImageMimeType(file) {
   return supportedInputExtensionTypes.get(extension) || '';
 }
 
-function normalizeUploadedDataUrl(dataUrl, mimeType) {
-  return String(dataUrl || '').replace(/^data:[^;,]*(;base64,)/i, `data:${mimeType}$1`);
-}
-
 async function prepareUploadedImage(file, mimeType) {
   if (mimeType === 'image/heic' || mimeType === 'image/heif') {
-    return readOriginalImageFile(file, mimeType, { skipPreview: true });
+    return readOriginalImageFile(file, mimeType);
   }
 
   try {
@@ -597,12 +602,11 @@ async function prepareUploadedImage(file, mimeType) {
   return readOriginalImageFile(file, mimeType);
 }
 
-async function readOriginalImageFile(file, mimeType, options = {}) {
+async function readOriginalImageFile(file, mimeType) {
   return {
-    dataUrl: normalizeUploadedDataUrl(await readFileAsDataUrl(file), mimeType),
+    blob: file,
     fileName: normalizeUploadFileName(file.name, extensionForMimeType(mimeType)),
-    imageUrl: options.skipPreview ? '' : URL.createObjectURL(file),
-    size: file.size,
+    mimeType,
   };
 }
 
@@ -619,11 +623,21 @@ async function convertImageFileToJpeg(file) {
 
   if (!best) return null;
   return {
-    dataUrl: await readFileAsDataUrl(best),
+    blob: best,
     fileName: normalizeUploadFileName(file.name, '.jpg'),
-    imageUrl: URL.createObjectURL(best),
-    size: best.size,
+    mimeType: 'image/jpeg',
   };
+}
+
+async function uploadBaseImage(image) {
+  return fetchJson('/api/uploads', {
+    method: 'POST',
+    headers: {
+      'Content-Type': image.mimeType,
+      'X-File-Name': encodeURIComponent(image.fileName || `upload-${Date.now()}`),
+    },
+    body: image.blob,
+  });
 }
 
 async function decodeImageFile(file) {
@@ -905,15 +919,6 @@ function getJobDetail(job) {
   if (job.status === 'queued') return '等待中';
   if (job.status === 'running') return '后台处理中';
   return '';
-}
-
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener('load', () => resolve(reader.result));
-    reader.addEventListener('error', () => reject(new Error('读取上传图片失败。')));
-    reader.readAsDataURL(file);
-  });
 }
 
 async function fetchJson(url, options = {}, behavior = {}) {
