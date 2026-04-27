@@ -34,6 +34,7 @@ const MAX_JOBS = 30;
 const MAX_UPLOADS = 80;
 const MAX_CONCURRENT_JOBS = clampInteger(process.env.IMAGE_MAX_CONCURRENT_JOBS, 1, 1, 4);
 const APP_VERSION = 'personal-v0.1.0';
+const WEB_VERSION = 'web-v0.1.1';
 
 const sessions = new Map();
 const pendingJobOptions = new Map();
@@ -54,6 +55,7 @@ const server = http.createServer(async (request, response) => {
         role: session?.role || '',
         username: session?.username || '',
         version: APP_VERSION,
+        webVersion: WEB_VERSION,
       });
     }
 
@@ -71,6 +73,7 @@ const server = http.createServer(async (request, response) => {
         role: user.role,
         username: user.username,
         version: APP_VERSION,
+        webVersion: WEB_VERSION,
       }, {
         'Set-Cookie': createSessionCookie(sessionId),
       });
@@ -110,6 +113,7 @@ const server = http.createServer(async (request, response) => {
         quality: DEFAULT_CONFIG.IMAGE_QUALITY || 'default',
         size: DEFAULT_CONFIG.IMAGE_SIZE,
         sizes: IMAGE_SIZE_OPTIONS,
+        webVersion: WEB_VERSION,
       };
       if (isAdminSession(session)) {
         config.systemSettings = {

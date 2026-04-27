@@ -128,7 +128,7 @@ async function showApp(session) {
   appView.hidden = false;
   const roleLabel = session.role === 'admin' ? '管理员' : '普通用户';
   currentUser.textContent = `${session.username || '-'} · ${roleLabel}`;
-  appVersion.textContent = session.version || 'personal-v0.1.0';
+  appVersion.textContent = formatVersionLabel(session);
   updateAdminVisibility();
   await loadConfig();
   await refreshDashboard();
@@ -147,7 +147,7 @@ function showLogin() {
 async function loadConfig() {
   defaults = await fetchJson('/api/config');
   estimatedCostCny = Number(defaults.estimatedCostCny || 0.2);
-  appVersion.textContent = defaults.appVersion || appVersion.textContent;
+  appVersion.textContent = formatVersionLabel(defaults) || appVersion.textContent;
   costNote.textContent = `预计消耗 ${formatMoney(estimatedCostCny)} 元`;
   const systemSettings = defaults.systemSettings || {};
   if (canCustomizeApi()) {
@@ -952,6 +952,12 @@ function showStatus(message, type) {
 function showLoginStatus(message, type) {
   loginStatus.className = `notice ${type || ''}`.trim();
   loginStatus.textContent = message;
+}
+
+function formatVersionLabel(info) {
+  const app = info?.version || info?.appVersion || 'personal-v0.1.0';
+  const web = info?.webVersion || 'web-v0.1.1';
+  return `${app} · ${web}`;
 }
 
 function showUserStatus(message, type) {
