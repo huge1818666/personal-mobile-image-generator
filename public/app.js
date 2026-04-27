@@ -53,6 +53,13 @@ const settingsKey = 'personal-mobile-image-settings-v2';
 const legacySettingsKey = 'personal-mobile-image-settings-v1';
 const GENERATE_MIN_PROMPT_CHARACTERS = 15;
 const EDIT_MIN_PROMPT_CHARACTERS = 10;
+const UPLOAD_IMAGE_TARGET_BYTES = 4 * 1024 * 1024;
+const UPLOAD_IMAGE_CONVERSION_OPTIONS = Object.freeze([
+  { maxEdge: 1800, quality: 0.88 },
+  { maxEdge: 1600, quality: 0.82 },
+  { maxEdge: 1400, quality: 0.76 },
+  { maxEdge: 1200, quality: 0.7 },
+]);
 const supportedInputMimeTypes = new Set([
   'image/png',
   'image/jpeg',
@@ -454,14 +461,14 @@ async function addIncomingFiles(files) {
     if (!mimeType) {
       throw new Error('上传底图只支持 PNG、JPG/JPEG、WEBP、HEIC/HEIF 格式。');
     }
-    const dataUrl = await readFileAsDataUrl(file);
+    const preparedImage = await prepareUploadedImage(file, mimeType);
     uploaded.push({
-      dataUrl: normalizeUploadedDataUrl(dataUrl, mimeType),
-      fileName: file.name,
-      imageUrl: URL.createObjectURL(file),
+      dataUrl: preparedImage.dataUrl,
+      fileName: preparedImage.fileName,
+      imageUrl: preparedImage.imageUrl,
       kind: 'upload',
       role: baseImages.some((image) => image.role === 'target') ? 'reference' : 'target',
-      size: file.size,
+      size: preparedImage.size,
     });
   }
   baseImages = [...baseImages, ...uploaded];
@@ -569,6 +576,117 @@ function getSupportedImageMimeType(file) {
 
 function normalizeUploadedDataUrl(dataUrl, mimeType) {
   return String(dataUrl || '').replace(/^data:[^;,]*(;base64,)/i, `data:${mimeType}$1`);
+}
+
+async function prepareUploadedImage(file, mimeType) {
+  try {
+    const converted = await convertImageFileToJpeg(file);
+    if (converted) return converted;
+  } catch (error) {
+    if (mimeType !== 'image/heic' && mimeType !== 'image/heif' && file.size <= UPLOAD_IMAGE_TARGET_BYTES) {
+      return readOriginalImageFile(file, mimeType);
+    }
+    if (mimeType !== 'image/heic' && mimeType !== 'image/heif') {
+      throw new Error(`这张图片较大，手机浏览器压缩失败：${error.message || '请换一张小图后重试。'}`);
+    }
+  }
+  return readOriginalImageFile(file, mimeType);
+}
+
+async function readOriginalImageFile(file, mimeType) {
+  return {
+    dataUrl: normalizeUploadedDataUrl(await readFileAsDataUrl(file), mimeType),
+    fileName: normalizeUploadFileName(file.name, extensionForMimeType(mimeType)),
+    imageUrl: URL.createObjectURL(file),
+    size: file.size,
+  };
+}
+
+async function convertImageFileToJpeg(file) {
+  const image = await decodeImageFile(file);
+  let best = null;
+
+  for (const option of UPLOAD_IMAGE_CONVERSION_OPTIONS) {
+    const canvas = drawImageToCanvas(image, option.maxEdge);
+    const blob = await canvasToBlob(canvas, 'image/jpeg', option.quality);
+    best = blob;
+    if (blob.size <= UPLOAD_IMAGE_TARGET_BYTES) break;
+  }
+
+  if (!best) return null;
+  return {
+    dataUrl: await readFileAsDataUrl(best),
+    fileName: normalizeUploadFileName(file.name, '.jpg'),
+    imageUrl: URL.createObjectURL(best),
+    size: best.size,
+  };
+}
+
+async function decodeImageFile(file) {
+  if ('createImageBitmap' in window) {
+    try {
+      return await createImageBitmap(file, { imageOrientation: 'from-image' });
+    } catch {
+      // Fall through to HTMLImageElement decoding for mobile Safari compatibility.
+    }
+  }
+
+  const imageUrl = URL.createObjectURL(file);
+  try {
+    return await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error('无法读取这张图片。'));
+      image.src = imageUrl;
+    });
+  } finally {
+    URL.revokeObjectURL(imageUrl);
+  }
+}
+
+function drawImageToCanvas(image, maxEdge) {
+  const sourceWidth = Number(image.width || 0);
+  const sourceHeight = Number(image.height || 0);
+  if (!sourceWidth || !sourceHeight) throw new Error('图片尺寸异常。');
+  const scale = Math.min(1, maxEdge / Math.max(sourceWidth, sourceHeight));
+  const width = Math.max(1, Math.round(sourceWidth * scale));
+  const height = Math.max(1, Math.round(sourceHeight * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('当前浏览器不支持图片压缩。');
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, width, height);
+  context.drawImage(image, 0, 0, width, height);
+  return canvas;
+}
+
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error('图片压缩失败。'));
+        return;
+      }
+      resolve(blob);
+    }, type, quality);
+  });
+}
+
+function normalizeUploadFileName(fileName, extension) {
+  const baseName = String(fileName || `upload-${Date.now()}`).replace(/\.[^.]+$/, '');
+  return `${baseName || `upload-${Date.now()}`}${extension}`;
+}
+
+function extensionForMimeType(mimeType) {
+  return {
+    'image/heic': '.heic',
+    'image/heif': '.heif',
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/webp': '.webp',
+  }[mimeType] || '.jpg';
 }
 
 function updateOutputCompressionState() {
@@ -795,7 +913,12 @@ function readFileAsDataUrl(file) {
 }
 
 async function fetchJson(url, options = {}, behavior = {}) {
-  const response = await fetch(url, { credentials: 'same-origin', ...options });
+  let response;
+  try {
+    response = await fetch(url, { credentials: 'same-origin', ...options });
+  } catch (error) {
+    throw new Error(`网络请求失败：${error.message || '请检查网络连接，或换一张小一点的图片后重试。'}`);
+  }
   const text = await response.text();
   let json;
   try {

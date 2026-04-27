@@ -38,6 +38,7 @@ const runningJobs = new Set();
 let dataMutationQueue = Promise.resolve();
 let schedulingJobs = false;
 let needsSchedule = false;
+let sharpModulePromise = null;
 
 const server = http.createServer(async (request, response) => {
   try {
@@ -792,7 +793,7 @@ async function readBaseImagesFromRequest(body) {
       continue;
     }
     if (input.baseImageData) {
-      baseImages.push(parseUploadedImageData(input.baseImageData, input.baseImageName, input, baseImages.length));
+      baseImages.push(await parseUploadedImageData(input.baseImageData, input.baseImageName, input, baseImages.length));
     }
   }
 
@@ -802,27 +803,64 @@ async function readBaseImagesFromRequest(body) {
   return baseImages;
 }
 
-function parseUploadedImageData(baseImageData, baseImageName, input = {}, index = 0) {
+async function parseUploadedImageData(baseImageData, baseImageName, input = {}, index = 0) {
   const match = String(baseImageData).match(/^data:(image\/(?:png|jpe?g|webp|hei[cf]));base64,([\s\S]+)$/i);
   if (!match) {
     throw Object.assign(new Error('上传底图只支持 PNG、JPG/JPEG、WEBP、HEIC/HEIF 格式。'), { statusCode: 400 });
   }
 
-  const mimeType = match[1].toLowerCase().replace('image/jpg', 'image/jpeg');
-  const buffer = Buffer.from(match[2], 'base64');
+  let mimeType = match[1].toLowerCase().replace('image/jpg', 'image/jpeg');
+  let buffer = Buffer.from(match[2], 'base64');
   if (!buffer.length) {
     throw Object.assign(new Error('上传底图内容为空。'), { statusCode: 400 });
+  }
+  let fileName = path.basename(String(baseImageName || `uploaded-${Date.now()}${extensionForImageMimeType(mimeType)}`));
+
+  if (mimeType === 'image/heic' || mimeType === 'image/heif') {
+    const converted = await convertHeicToJpeg(buffer, fileName);
+    buffer = converted.buffer;
+    fileName = converted.fileName;
+    mimeType = converted.mimeType;
   }
 
   return {
     buffer,
-    fileName: path.basename(String(baseImageName || `uploaded-${Date.now()}${extensionForImageMimeType(mimeType)}`)),
+    fileName,
     kind: 'upload',
     label: normalizeBaseImageLabel(input.baseImageLabel, index),
     mimeType,
     role: normalizeBaseImageRole(input.baseImageRole, index === 0 ? 'target' : 'reference'),
     size: buffer.length,
   };
+}
+
+async function convertHeicToJpeg(buffer, fileName) {
+  try {
+    const sharp = await getSharp();
+    const jpegBuffer = await sharp(buffer, { limitInputPixels: 80_000_000 })
+      .rotate()
+      .jpeg({ mozjpeg: true, quality: 88 })
+      .toBuffer();
+    return {
+      buffer: jpegBuffer,
+      fileName: replaceImageExtension(fileName, '.jpg'),
+      mimeType: 'image/jpeg',
+    };
+  } catch (error) {
+    throw Object.assign(new Error(`HEIC/HEIF 底图转换失败：${error.message || '请先转成 JPG 后再上传。'}`), {
+      statusCode: 400,
+    });
+  }
+}
+
+async function getSharp() {
+  sharpModulePromise ||= import('sharp').then((module) => module.default || module);
+  return sharpModulePromise;
+}
+
+function replaceImageExtension(fileName, extension) {
+  const safeName = path.basename(String(fileName || `uploaded-${Date.now()}${extension}`));
+  return /\.[^.]+$/.test(safeName) ? safeName.replace(/\.[^.]+$/, extension) : `${safeName}${extension}`;
 }
 
 function extensionForImageMimeType(mimeType) {
