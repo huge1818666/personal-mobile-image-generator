@@ -34,7 +34,7 @@ APP_USERNAME=管理员账号 APP_PASSWORD=管理员密码 NEWAPI_API_KEY=你的k
 
 ## 爱快 Docker 部署
 
-项目已经内置 `Dockerfile` 和 `docker-compose.yml`。容器内使用 `/data` 保存用户、任务记录和生成图片，部署时需要挂载出来。
+项目已经内置 `Dockerfile` 和 `docker-compose.yml`。容器内使用 `/data` 保存登录会话、用户、任务记录和生成图片，部署时需要挂载出来。
 
 GitHub 镜像发布后，可以直接使用：
 

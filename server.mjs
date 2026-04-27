@@ -22,6 +22,8 @@ const ROOT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
 const DATA_FILE = path.join(PROJECT_DIR, '.personal-data.json');
 const SESSION_COOKIE = 'personal_image_session';
+const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
+const SESSION_MAX_AGE_MS = SESSION_MAX_AGE_SECONDS * 1000;
 const ENV_ADMIN_ID = 'env-admin';
 const MAX_JSON_BYTES = 70 * 1024 * 1024;
 const MAX_BASE_IMAGES = 4;
@@ -59,25 +61,20 @@ const server = http.createServer(async (request, response) => {
       }
 
       const sessionId = randomBytes(32).toString('hex');
-      sessions.set(sessionId, {
-        createdAt: Date.now(),
-        role: user.role,
-        userId: user.id,
-        username: user.username,
-      });
+      await createSession(sessionId, user);
       return sendJson(response, 200, {
         authenticated: true,
         role: user.role,
         username: user.username,
         version: APP_VERSION,
       }, {
-        'Set-Cookie': `${SESSION_COOKIE}=${sessionId}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800`,
+        'Set-Cookie': createSessionCookie(sessionId),
       });
     }
 
     if (request.method === 'POST' && requestUrl.pathname === '/api/logout') {
       const sessionId = getCookie(request, SESSION_COOKIE);
-      if (sessionId) sessions.delete(sessionId);
+      if (sessionId) await deleteSession(sessionId);
       return sendJson(response, 200, { authenticated: false }, {
         'Set-Cookie': `${SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`,
       });
@@ -222,7 +219,7 @@ const server = http.createServer(async (request, response) => {
 });
 
 server.listen(PORT, HOST, async () => {
-  await readData();
+  await loadSessions();
   await markInterruptedJobs();
   console.log(`Personal image generator running at http://${HOST}:${PORT}`);
   console.log(`Username: ${APP_USERNAME}`);
@@ -232,6 +229,74 @@ server.listen(PORT, HOST, async () => {
 function isProtectedRequest(requestUrl) {
   return requestUrl.pathname.startsWith('/api/')
     || requestUrl.pathname.startsWith('/generated/');
+}
+
+async function loadSessions() {
+  const data = await readData();
+  hydrateSessions(data.sessions);
+  const activeSessions = getPersistentSessions();
+  if (activeSessions.length !== data.sessions.length) {
+    data.sessions = activeSessions;
+    await writeData(data);
+  }
+}
+
+async function createSession(sessionId, user) {
+  const now = Date.now();
+  sessions.set(sessionId, {
+    createdAt: now,
+    expiresAt: now + SESSION_MAX_AGE_MS,
+    role: user.role,
+    userId: user.id,
+    username: user.username,
+  });
+  await persistSessions();
+}
+
+async function deleteSession(sessionId) {
+  sessions.delete(sessionId);
+  await persistSessions();
+}
+
+async function persistSessions() {
+  await mutateData(async (data) => {
+    data.sessions = getPersistentSessions();
+  });
+}
+
+function hydrateSessions(sessionRecords = []) {
+  sessions.clear();
+  const now = Date.now();
+  for (const record of sessionRecords) {
+    const sessionId = String(record?.id || '');
+    const expiresAt = Number(record?.expiresAt || 0);
+    if (!sessionId || !record?.username || expiresAt <= now) continue;
+    sessions.set(sessionId, {
+      createdAt: Number(record.createdAt || now),
+      expiresAt,
+      role: normalizeUserRole(record.role),
+      userId: String(record.userId || ''),
+      username: String(record.username || ''),
+    });
+  }
+}
+
+function getPersistentSessions() {
+  const now = Date.now();
+  return [...sessions.entries()]
+    .filter(([, session]) => Number(session.expiresAt || 0) > now)
+    .map(([id, session]) => ({
+      createdAt: Number(session.createdAt || now),
+      expiresAt: Number(session.expiresAt || now + SESSION_MAX_AGE_MS),
+      id,
+      role: normalizeUserRole(session.role),
+      userId: String(session.userId || ''),
+      username: String(session.username || ''),
+    }));
+}
+
+function createSessionCookie(sessionId) {
+  return `${SESSION_COOKIE}=${sessionId}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}`;
 }
 
 async function handleAdminRequest(request, response, requestUrl) {
@@ -805,11 +870,22 @@ async function readData() {
   try {
     data = JSON.parse(await readFile(DATA_FILE, 'utf8'));
   } catch {
-    data = { images: [], jobs: [], users: [] };
+    data = { images: [], jobs: [], sessions: [], users: [] };
   }
   if (!Array.isArray(data.images)) data.images = [];
   if (!Array.isArray(data.jobs)) data.jobs = [];
+  if (!Array.isArray(data.sessions)) data.sessions = [];
   if (!Array.isArray(data.users)) data.users = [];
+  data.sessions = data.sessions
+    .filter((session) => session && session.id && session.username)
+    .map((session) => ({
+      createdAt: Number(session.createdAt || 0),
+      expiresAt: Number(session.expiresAt || 0),
+      id: String(session.id || ''),
+      role: normalizeUserRole(session.role),
+      userId: String(session.userId || ''),
+      username: String(session.username || ''),
+    }));
   data.users = data.users
     .filter((user) => user && user.id && user.username && user.passwordHash)
     .map((user) => ({
@@ -829,6 +905,7 @@ async function writeData(data) {
   await writeFile(DATA_FILE, JSON.stringify({
     images: data.images.slice(0, MAX_IMAGES),
     jobs: data.jobs.slice(0, MAX_JOBS),
+    sessions: data.sessions || [],
     users: data.users,
   }, null, 2));
 }
@@ -858,7 +935,14 @@ async function removeImages(images) {
 function getSession(request) {
   const sessionId = getCookie(request, SESSION_COOKIE);
   if (!sessionId) return null;
-  return sessions.get(sessionId) || null;
+  const session = sessions.get(sessionId);
+  if (!session) return null;
+  if (Number(session.expiresAt || 0) <= Date.now()) {
+    sessions.delete(sessionId);
+    persistSessions().catch((error) => console.error('Failed to persist expired session cleanup:', error));
+    return null;
+  }
+  return session;
 }
 
 function getCookie(request, name) {
