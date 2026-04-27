@@ -122,7 +122,7 @@ export async function generateImage(options = {}) {
   if (!prompt) {
     throw new ImageGenerationError('请先填写图片提示词。', { statusCode: 400 });
   }
-  validatePromptLength(prompt, 30, '从 0 生成图片');
+  validatePromptLength(prompt, 15, '从 0 生成图片');
 
   const apiKey = normalizeApiKey(options.apiKey || DEFAULT_CONFIG.NEWAPI_API_KEY);
   if (isPlaceholderApiKey(apiKey)) {
@@ -212,7 +212,7 @@ export async function editImage(options = {}) {
   if (!prompt) {
     throw new ImageGenerationError('请先填写图片修改提示词。', { statusCode: 400 });
   }
-  validatePromptLength(prompt, 20, '底图修改');
+  validatePromptLength(prompt, 10, '底图修改');
 
   const apiKey = normalizeApiKey(options.apiKey || DEFAULT_CONFIG.NEWAPI_API_KEY);
   if (isPlaceholderApiKey(apiKey)) {
@@ -458,12 +458,12 @@ function extensionForOutputFormat(outputFormat) {
 
 function normalizeBaseImageName(baseImageName) {
   const fileName = path.basename(String(baseImageName || 'base-image.png').trim()) || 'base-image.png';
-  return /\.(png|jpg|jpeg|webp)$/i.test(fileName) ? fileName : `${fileName}.png`;
+  return /\.(png|jpg|jpeg|webp|heic|heif)$/i.test(fileName) ? fileName : `${fileName}.png`;
 }
 
 function normalizeImageMimeType(value, fileName) {
   const mimeType = String(value || '').trim().toLowerCase().replace('image/jpg', 'image/jpeg');
-  if (['image/png', 'image/jpeg', 'image/webp'].includes(mimeType)) {
+  if (['image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif'].includes(mimeType)) {
     return mimeType;
   }
 
@@ -471,6 +471,8 @@ function normalizeImageMimeType(value, fileName) {
   const mimeFromExtension = {
     '.jpeg': 'image/jpeg',
     '.jpg': 'image/jpeg',
+    '.heic': 'image/heic',
+    '.heif': 'image/heif',
     '.png': 'image/png',
     '.webp': 'image/webp',
   }[extension];
@@ -479,5 +481,5 @@ function normalizeImageMimeType(value, fileName) {
     return mimeFromExtension;
   }
 
-  throw new ImageGenerationError('底图只支持 PNG、JPG/JPEG、WEBP 格式。', { statusCode: 400 });
+  throw new ImageGenerationError('底图只支持 PNG、JPG/JPEG、WEBP、HEIC/HEIF 格式。', { statusCode: 400 });
 }

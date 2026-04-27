@@ -51,6 +51,23 @@ const adminApiSettings = [...document.querySelectorAll('[data-admin-api-setting]
 
 const settingsKey = 'personal-mobile-image-settings-v2';
 const legacySettingsKey = 'personal-mobile-image-settings-v1';
+const GENERATE_MIN_PROMPT_CHARACTERS = 15;
+const EDIT_MIN_PROMPT_CHARACTERS = 10;
+const supportedInputMimeTypes = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/heic',
+  'image/heif',
+]);
+const supportedInputExtensionTypes = new Map([
+  ['.heic', 'image/heic'],
+  ['.heif', 'image/heif'],
+  ['.jpeg', 'image/jpeg'],
+  ['.jpg', 'image/jpeg'],
+  ['.png', 'image/png'],
+  ['.webp', 'image/webp'],
+]);
 const fallbackExamples = [
   {
     title: '手机竖版活动图',
@@ -358,7 +375,7 @@ baseImageFile.addEventListener('change', () => {
 });
 
 document.addEventListener('paste', (event) => {
-  const files = [...(event.clipboardData?.files || [])].filter((file) => file.type.startsWith('image/'));
+  const files = [...(event.clipboardData?.files || [])].filter((file) => getSupportedImageMimeType(file));
   if (!files.length) return;
   event.preventDefault();
   addIncomingFiles(files).catch((error) => showStatus(error.message, 'error'));
@@ -433,11 +450,13 @@ async function addIncomingFiles(files) {
   }
   const uploaded = [];
   for (const file of files) {
-    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
-      throw new Error('上传底图只支持 PNG、JPG/JPEG、WEBP 格式。');
+    const mimeType = getSupportedImageMimeType(file);
+    if (!mimeType) {
+      throw new Error('上传底图只支持 PNG、JPG/JPEG、WEBP、HEIC/HEIF 格式。');
     }
+    const dataUrl = await readFileAsDataUrl(file);
     uploaded.push({
-      dataUrl: await readFileAsDataUrl(file),
+      dataUrl: normalizeUploadedDataUrl(dataUrl, mimeType),
       fileName: file.name,
       imageUrl: URL.createObjectURL(file),
       kind: 'upload',
@@ -526,7 +545,7 @@ function serializeBaseImages() {
 }
 
 function validatePrompt() {
-  const minimum = baseImages.length ? 20 : 30;
+  const minimum = baseImages.length ? EDIT_MIN_PROMPT_CHARACTERS : GENERATE_MIN_PROMPT_CHARACTERS;
   const count = countPromptCharacters(promptInput.value);
   if (count < minimum) {
     throw new Error(`${baseImages.length ? '底图修改' : '从 0 生成'}提示词至少 ${minimum} 个字，当前约 ${count} 个字。`);
@@ -534,10 +553,22 @@ function validatePrompt() {
 }
 
 function updatePromptRule() {
-  const minimum = baseImages.length ? 20 : 30;
+  const minimum = baseImages.length ? EDIT_MIN_PROMPT_CHARACTERS : GENERATE_MIN_PROMPT_CHARACTERS;
   const count = countPromptCharacters(promptInput.value);
   promptRule.textContent = `${baseImages.length ? '底图修改' : '从 0 生成'}至少 ${minimum} 个字，当前约 ${count} 个字。`;
   promptMeta.classList.toggle('warning', count > 0 && count < minimum);
+}
+
+function getSupportedImageMimeType(file) {
+  const mimeType = String(file.type || '').toLowerCase();
+  if (supportedInputMimeTypes.has(mimeType)) return mimeType;
+  const fileName = String(file.name || '').toLowerCase();
+  const extension = fileName.match(/\.[^.]+$/)?.[0] || '';
+  return supportedInputExtensionTypes.get(extension) || '';
+}
+
+function normalizeUploadedDataUrl(dataUrl, mimeType) {
+  return String(dataUrl || '').replace(/^data:[^;,]*(;base64,)/i, `data:${mimeType}$1`);
 }
 
 function updateOutputCompressionState() {

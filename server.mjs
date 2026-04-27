@@ -738,9 +738,9 @@ async function readBaseImagesFromRequest(body) {
 }
 
 function parseUploadedImageData(baseImageData, baseImageName, input = {}, index = 0) {
-  const match = String(baseImageData).match(/^data:(image\/(?:png|jpe?g|webp));base64,([\s\S]+)$/i);
+  const match = String(baseImageData).match(/^data:(image\/(?:png|jpe?g|webp|hei[cf]));base64,([\s\S]+)$/i);
   if (!match) {
-    throw Object.assign(new Error('上传底图只支持 PNG、JPG/JPEG、WEBP 格式。'), { statusCode: 400 });
+    throw Object.assign(new Error('上传底图只支持 PNG、JPG/JPEG、WEBP、HEIC/HEIF 格式。'), { statusCode: 400 });
   }
 
   const mimeType = match[1].toLowerCase().replace('image/jpg', 'image/jpeg');
@@ -751,13 +751,23 @@ function parseUploadedImageData(baseImageData, baseImageName, input = {}, index 
 
   return {
     buffer,
-    fileName: path.basename(String(baseImageName || `uploaded-${Date.now()}.png`)),
+    fileName: path.basename(String(baseImageName || `uploaded-${Date.now()}${extensionForImageMimeType(mimeType)}`)),
     kind: 'upload',
     label: normalizeBaseImageLabel(input.baseImageLabel, index),
     mimeType,
     role: normalizeBaseImageRole(input.baseImageRole, index === 0 ? 'target' : 'reference'),
     size: buffer.length,
   };
+}
+
+function extensionForImageMimeType(mimeType) {
+  return {
+    'image/heic': '.heic',
+    'image/heif': '.heif',
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/webp': '.webp',
+  }[mimeType] || '.png';
 }
 
 function normalizeBaseImageLabel(label, index) {

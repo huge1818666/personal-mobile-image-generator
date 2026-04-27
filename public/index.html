@@ -47,7 +47,7 @@
         <textarea id="prompt" rows="8" placeholder="写清楚画面主体、场景、文字、风格和用途。上传底图后，可以写“保留主体，换成更干净的背景”。" required></textarea>
       </label>
       <div id="promptMeta" class="prompt-meta">
-        <span id="promptRule">从 0 生成至少 30 个字。</span>
+        <span id="promptRule">从 0 生成至少 15 个字。</span>
         <button id="clearPromptButton" type="button" class="link-button">清空</button>
       </div>
 
@@ -62,7 +62,7 @@
           <button id="clearBaseButton" type="button" class="soft-button small" disabled>清除</button>
         </div>
         <label class="upload-button">
-          <input id="baseImageFile" type="file" accept="image/png,image/jpeg,image/webp" multiple>
+          <input id="baseImageFile" type="file" accept="image/png,image/jpeg,image/webp,image/heic,image/heif,.heic,.heif" multiple>
           <span>上传图片</span>
         </label>
         <div id="baseImageList" class="base-image-list" hidden></div>
