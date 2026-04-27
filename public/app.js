@@ -659,7 +659,7 @@ async function uploadBaseImageInChunks(image) {
   for (let index = 0; index < total; index += 1) {
     const offset = index * chunkSize;
     const chunk = image.blob.slice(offset, Math.min(offset + chunkSize, image.blob.size));
-    showStatus(`正在上传 HEIC 底图 ${index + 1}/${total}...`, '');
+    showStatus(`正在上传 HEIC 底图 ${index + 1}/${total}，每段约 ${formatBytes(chunkSize)}...`, '');
     await fetchJson(`/api/uploads/chunk/${encodeURIComponent(start.uploadId)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -672,11 +672,16 @@ async function uploadBaseImageInChunks(image) {
   }
 
   showStatus('正在转换 HEIC 底图...', '');
-  return fetchJson(`/api/uploads/chunk/${encodeURIComponent(start.uploadId)}/complete`, {
+  const completed = await fetchJson(`/api/uploads/chunk/${encodeURIComponent(start.uploadId)}/complete`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ total }),
   });
+  if (completed.upload) return completed;
+  if (completed.processing && completed.conversionId) {
+    return waitForBaseUploadConversion(completed.conversionId);
+  }
+  throw new Error('HEIC 底图转换状态异常，请重新选择图片。');
 }
 
 function blobToBase64(blob) {
@@ -686,6 +691,23 @@ function blobToBase64(blob) {
     reader.onerror = () => reject(new Error('读取上传分片失败。'));
     reader.readAsDataURL(blob);
   });
+}
+
+async function waitForBaseUploadConversion(conversionId) {
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    showStatus(`正在转换 HEIC 底图为 JPG${attempt ? `，已等待 ${attempt + 1} 秒` : ''}...`, '');
+    await delay(1000);
+    const result = await fetchJson(`/api/uploads/chunk/${encodeURIComponent(conversionId)}/status`);
+    if (result.status === 'done' && result.upload) return { upload: result.upload };
+    if (result.status === 'error') {
+      throw new Error(result.error || 'HEIC/HEIF 底图转换失败，请先转成 JPG 后再上传。');
+    }
+  }
+  throw new Error('HEIC/HEIF 底图转换超时，请先转成 JPG 后再上传。');
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function decodeImageFile(file) {
@@ -1004,7 +1026,7 @@ function showLoginStatus(message, type) {
 
 function formatVersionLabel(info) {
   const app = info?.version || info?.appVersion || 'personal-v0.1.0';
-  const web = info?.webVersion || 'web-v0.1.2';
+  const web = info?.webVersion || 'web-v0.1.3';
   return `${app} · ${web}`;
 }
 

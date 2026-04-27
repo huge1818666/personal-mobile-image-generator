@@ -4,6 +4,7 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Worker } from 'node:worker_threads';
 import {
   DEFAULT_CONFIG,
   editImage,
@@ -36,15 +37,15 @@ const MAX_JOBS = 30;
 const MAX_UPLOADS = 80;
 const MAX_CONCURRENT_JOBS = clampInteger(process.env.IMAGE_MAX_CONCURRENT_JOBS, 1, 1, 4);
 const APP_VERSION = 'personal-v0.1.0';
-const WEB_VERSION = 'web-v0.1.2';
+const WEB_VERSION = 'web-v0.1.3';
 
 const sessions = new Map();
 const pendingJobOptions = new Map();
+const pendingUploadConversions = new Map();
 const runningJobs = new Set();
 let dataMutationQueue = Promise.resolve();
 let schedulingJobs = false;
 let needsSchedule = false;
-let heicConvertPromise = null;
 
 const server = http.createServer(async (request, response) => {
   try {
@@ -157,14 +158,24 @@ const server = http.createServer(async (request, response) => {
       return sendJson(response, 201, upload);
     }
 
+    if (request.method === 'GET' && requestUrl.pathname.startsWith('/api/uploads/chunk/')) {
+      const chunkPath = requestUrl.pathname.slice('/api/uploads/chunk/'.length);
+      const [chunkUploadId, action] = chunkPath.split('/');
+      if (action === 'status') {
+        const result = getChunkedBaseUploadStatus(chunkUploadId, session);
+        return sendJson(response, 200, result);
+      }
+      return sendJson(response, 404, { error: 'Not found' });
+    }
+
     if (request.method === 'POST' && requestUrl.pathname.startsWith('/api/uploads/chunk/')) {
       const chunkPath = requestUrl.pathname.slice('/api/uploads/chunk/'.length);
       const [chunkUploadId, action] = chunkPath.split('/');
       if (!chunkUploadId) return sendJson(response, 404, { error: 'Not found' });
       const body = await readJson(request);
       if (action === 'complete') {
-        const upload = await completeChunkedBaseUpload(chunkUploadId, body, session);
-        return sendJson(response, 201, { upload });
+        const result = await completeChunkedBaseUpload(chunkUploadId, body, session);
+        return sendJson(response, result.processing ? 202 : 201, result);
       }
       if (!action) {
         const result = await saveBaseUploadChunk(chunkUploadId, body, session);
@@ -907,14 +918,74 @@ async function completeChunkedBaseUpload(chunkUploadId, body, session) {
     throw Object.assign(new Error('上传图片大小校验失败，请重新选择图片。'), { statusCode: 400 });
   }
 
+  if (isHeicMimeType(meta.mimeType)) {
+    const record = {
+      createdAt: new Date().toISOString(),
+      error: '',
+      id: meta.id || String(chunkUploadId),
+      ownerUserId: meta.ownerUserId || session?.userId || '',
+      ownerUsername: meta.ownerUsername || session?.username || '',
+      status: 'processing',
+      upload: null,
+    };
+    pendingUploadConversions.set(record.id, record);
+    setImmediate(() => {
+      processChunkedBaseUploadConversion(record, inputBuffer, meta, session).catch((error) => {
+        record.error = error.message || 'HEIC/HEIF 底图转换失败。';
+        record.status = 'error';
+        scheduleUploadConversionCleanup(record.id);
+      });
+    });
+    return {
+      conversionId: record.id,
+      processing: true,
+      status: record.status,
+    };
+  }
+
   try {
     const upload = await storeBaseUploadFromBuffer(inputBuffer, meta.mimeType, meta.fileName, session);
     await rm(resolveChunkUploadDir(chunkUploadId), { force: true, recursive: true });
-    return upload;
+    return { upload };
   } catch (error) {
     await rm(resolveChunkUploadDir(chunkUploadId), { force: true, recursive: true });
     throw error;
   }
+}
+
+async function processChunkedBaseUploadConversion(record, inputBuffer, meta, session) {
+  try {
+    const upload = await storeBaseUploadFromBuffer(inputBuffer, meta.mimeType, meta.fileName, session);
+    await rm(resolveChunkUploadDir(record.id), { force: true, recursive: true });
+    record.upload = upload;
+    record.status = 'done';
+  } catch (error) {
+    await rm(resolveChunkUploadDir(record.id), { force: true, recursive: true });
+    record.error = error.message || 'HEIC/HEIF 底图转换失败。';
+    record.status = 'error';
+  } finally {
+    scheduleUploadConversionCleanup(record.id);
+  }
+}
+
+function getChunkedBaseUploadStatus(chunkUploadId, session) {
+  const uploadId = String(chunkUploadId || '').trim().toLowerCase();
+  const record = pendingUploadConversions.get(uploadId);
+  if (!record || !canAccessOwnedItem(record, session)) {
+    throw Object.assign(new Error('上传转换任务不存在，请重新选择图片。'), { statusCode: 404 });
+  }
+  return {
+    error: record.error || '',
+    status: record.status,
+    upload: record.upload || null,
+  };
+}
+
+function scheduleUploadConversionCleanup(conversionId) {
+  const timer = setTimeout(() => {
+    pendingUploadConversions.delete(conversionId);
+  }, 30 * 60 * 1000);
+  timer.unref?.();
 }
 
 async function storeBaseUploadFromBuffer(inputBuffer, mimeType, originalFileName, session) {
@@ -922,7 +993,7 @@ async function storeBaseUploadFromBuffer(inputBuffer, mimeType, originalFileName
   let fileMimeType = mimeType;
   let fileName = path.basename(originalFileName);
 
-  if (mimeType === 'image/heic' || mimeType === 'image/heif') {
+  if (isHeicMimeType(mimeType)) {
     const converted = await convertHeicToJpeg(inputBuffer, originalFileName);
     fileBuffer = converted.buffer;
     fileMimeType = converted.mimeType;
@@ -1117,7 +1188,7 @@ async function parseUploadedImageData(baseImageData, baseImageName, input = {}, 
   }
   let fileName = path.basename(String(baseImageName || `uploaded-${Date.now()}${extensionForImageMimeType(mimeType)}`));
 
-  if (mimeType === 'image/heic' || mimeType === 'image/heif') {
+  if (isHeicMimeType(mimeType)) {
     const converted = await convertHeicToJpeg(buffer, fileName);
     buffer = converted.buffer;
     fileName = converted.fileName;
@@ -1137,12 +1208,7 @@ async function parseUploadedImageData(baseImageData, baseImageName, input = {}, 
 
 async function convertHeicToJpeg(buffer, fileName) {
   try {
-    const convert = await getHeicConvert();
-    const jpegBuffer = Buffer.from(await convert({
-      buffer,
-      format: 'JPEG',
-      quality: 0.88,
-    }));
+    const jpegBuffer = await convertHeicBufferInWorker(buffer);
     return {
       buffer: jpegBuffer,
       fileName: replaceImageExtension(fileName, '.jpg'),
@@ -1155,9 +1221,67 @@ async function convertHeicToJpeg(buffer, fileName) {
   }
 }
 
-async function getHeicConvert() {
-  heicConvertPromise ||= import('heic-convert').then((module) => module.default || module);
-  return heicConvertPromise;
+function convertHeicBufferInWorker(buffer) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+    const worker = new Worker(`
+      const { parentPort, workerData } = require('node:worker_threads');
+
+      (async () => {
+        try {
+          const imported = await import('heic-convert');
+          const convert = imported.default || imported;
+          const output = await convert({
+            buffer: Buffer.from(workerData.buffer),
+            format: 'JPEG',
+            quality: 0.88,
+          });
+          parentPort.postMessage({ ok: true, buffer: Buffer.from(output) });
+        } catch (error) {
+          parentPort.postMessage({
+            ok: false,
+            error: error && error.message ? error.message : String(error),
+          });
+        }
+      })();
+    `, {
+      eval: true,
+      workerData: {
+        buffer,
+      },
+    });
+
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      callback();
+    };
+    timer = setTimeout(() => {
+      worker.terminate().catch(() => {});
+      finish(() => reject(new Error('HEIC/HEIF 底图转换超时，请先转成 JPG 后再上传。')));
+    }, 120000);
+    timer.unref?.();
+
+    worker.once('message', (message) => {
+      finish(() => {
+        if (message?.ok) {
+          resolve(Buffer.from(message.buffer));
+          return;
+        }
+        reject(new Error(message?.error || 'HEIC/HEIF 底图转换失败。'));
+      });
+    });
+    worker.once('error', (error) => {
+      finish(() => reject(error));
+    });
+    worker.once('exit', (code) => {
+      if (code !== 0) {
+        finish(() => reject(new Error(`HEIC/HEIF 底图转换进程异常退出：${code}`)));
+      }
+    });
+  });
 }
 
 function replaceImageExtension(fileName, extension) {
@@ -1173,6 +1297,10 @@ function extensionForImageMimeType(mimeType) {
     'image/png': '.png',
     'image/webp': '.webp',
   }[mimeType] || '.png';
+}
+
+function isHeicMimeType(mimeType) {
+  return mimeType === 'image/heic' || mimeType === 'image/heif';
 }
 
 function normalizeBaseImageLabel(label, index) {
