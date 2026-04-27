@@ -7,6 +7,6 @@
     "check": "node --check ./server.mjs && node --check ./image-api.mjs && node --check ./public/app.js"
   },
   "dependencies": {
-    "sharp": "^0.34.5"
+    "heic-convert": "^2.1.0"
   }
 }

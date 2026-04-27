@@ -301,6 +301,17 @@ textarea:focus {
   background: var(--surface-soft);
 }
 
+.base-image-placeholder {
+  display: grid;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  place-items: center;
+  background: var(--surface-soft);
+  color: var(--accent-strong);
+  font-size: 18px;
+  font-weight: 900;
+}
+
 .base-image-item span {
   display: block;
   overflow: hidden;

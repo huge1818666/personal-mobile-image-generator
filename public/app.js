@@ -511,7 +511,7 @@ function updateBaseImages() {
   baseImageList.innerHTML = baseImages.map((image, index) => `
     <article class="base-image-item">
       <button type="button" class="remove-base-image" data-remove-base-image="${index}" aria-label="删除图片${index + 1}">×</button>
-      <img src="${escapeAttribute(image.imageUrl)}" alt="图片${index + 1}">
+      ${image.imageUrl ? `<img src="${escapeAttribute(image.imageUrl)}" alt="图片${index + 1}">` : `<div class="base-image-placeholder">HEIC</div>`}
       <span>图片${index + 1} · ${escapeHtml(describeBaseImage(image))}</span>
     </article>
   `).join('');
@@ -579,6 +579,10 @@ function normalizeUploadedDataUrl(dataUrl, mimeType) {
 }
 
 async function prepareUploadedImage(file, mimeType) {
+  if (mimeType === 'image/heic' || mimeType === 'image/heif') {
+    return readOriginalImageFile(file, mimeType, { skipPreview: true });
+  }
+
   try {
     const converted = await convertImageFileToJpeg(file);
     if (converted) return converted;
@@ -593,11 +597,11 @@ async function prepareUploadedImage(file, mimeType) {
   return readOriginalImageFile(file, mimeType);
 }
 
-async function readOriginalImageFile(file, mimeType) {
+async function readOriginalImageFile(file, mimeType, options = {}) {
   return {
     dataUrl: normalizeUploadedDataUrl(await readFileAsDataUrl(file), mimeType),
     fileName: normalizeUploadFileName(file.name, extensionForMimeType(mimeType)),
-    imageUrl: URL.createObjectURL(file),
+    imageUrl: options.skipPreview ? '' : URL.createObjectURL(file),
     size: file.size,
   };
 }

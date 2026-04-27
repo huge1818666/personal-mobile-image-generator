@@ -38,7 +38,7 @@ const runningJobs = new Set();
 let dataMutationQueue = Promise.resolve();
 let schedulingJobs = false;
 let needsSchedule = false;
-let sharpModulePromise = null;
+let heicConvertPromise = null;
 
 const server = http.createServer(async (request, response) => {
   try {
@@ -836,11 +836,12 @@ async function parseUploadedImageData(baseImageData, baseImageName, input = {}, 
 
 async function convertHeicToJpeg(buffer, fileName) {
   try {
-    const sharp = await getSharp();
-    const jpegBuffer = await sharp(buffer, { limitInputPixels: 80_000_000 })
-      .rotate()
-      .jpeg({ mozjpeg: true, quality: 88 })
-      .toBuffer();
+    const convert = await getHeicConvert();
+    const jpegBuffer = Buffer.from(await convert({
+      buffer,
+      format: 'JPEG',
+      quality: 0.88,
+    }));
     return {
       buffer: jpegBuffer,
       fileName: replaceImageExtension(fileName, '.jpg'),
@@ -853,9 +854,9 @@ async function convertHeicToJpeg(buffer, fileName) {
   }
 }
 
-async function getSharp() {
-  sharpModulePromise ||= import('sharp').then((module) => module.default || module);
-  return sharpModulePromise;
+async function getHeicConvert() {
+  heicConvertPromise ||= import('heic-convert').then((module) => module.default || module);
+  return heicConvertPromise;
 }
 
 function replaceImageExtension(fileName, extension) {
