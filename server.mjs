@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs';
-import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
 import path from 'node:path';
@@ -22,19 +22,21 @@ const ROOT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
 const DATA_FILE = path.join(PROJECT_DIR, '.personal-data.json');
 const UPLOAD_DIR = path.join(PROJECT_DIR, 'base-uploads');
+const UPLOAD_CHUNK_DIR = path.join(PROJECT_DIR, 'base-upload-chunks');
 const SESSION_COOKIE = 'personal_image_session';
 const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
 const SESSION_MAX_AGE_MS = SESSION_MAX_AGE_SECONDS * 1000;
 const ENV_ADMIN_ID = 'env-admin';
 const MAX_JSON_BYTES = 70 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const UPLOAD_CHUNK_BYTES = 384 * 1024;
 const MAX_BASE_IMAGES = 4;
 const MAX_IMAGES = 30;
 const MAX_JOBS = 30;
 const MAX_UPLOADS = 80;
 const MAX_CONCURRENT_JOBS = clampInteger(process.env.IMAGE_MAX_CONCURRENT_JOBS, 1, 1, 4);
 const APP_VERSION = 'personal-v0.1.0';
-const WEB_VERSION = 'web-v0.1.1';
+const WEB_VERSION = 'web-v0.1.2';
 
 const sessions = new Map();
 const pendingJobOptions = new Map();
@@ -147,6 +149,28 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'POST' && requestUrl.pathname === '/api/uploads') {
       const upload = await createBaseUpload(request, session);
       return sendJson(response, 201, { upload });
+    }
+
+    if (request.method === 'POST' && requestUrl.pathname === '/api/uploads/chunk/start') {
+      const body = await readJson(request);
+      const upload = await startChunkedBaseUpload(body, session);
+      return sendJson(response, 201, upload);
+    }
+
+    if (request.method === 'POST' && requestUrl.pathname.startsWith('/api/uploads/chunk/')) {
+      const chunkPath = requestUrl.pathname.slice('/api/uploads/chunk/'.length);
+      const [chunkUploadId, action] = chunkPath.split('/');
+      if (!chunkUploadId) return sendJson(response, 404, { error: 'Not found' });
+      const body = await readJson(request);
+      if (action === 'complete') {
+        const upload = await completeChunkedBaseUpload(chunkUploadId, body, session);
+        return sendJson(response, 201, { upload });
+      }
+      if (!action) {
+        const result = await saveBaseUploadChunk(chunkUploadId, body, session);
+        return sendJson(response, 200, result);
+      }
+      return sendJson(response, 404, { error: 'Not found' });
     }
 
     if (request.method === 'GET' && requestUrl.pathname.startsWith('/api/uploads/')) {
@@ -798,6 +822,102 @@ async function createBaseUpload(request, session) {
   }
 
   const originalFileName = decodeHeaderValue(request.headers['x-file-name']) || `upload-${Date.now()}${extensionForImageMimeType(mimeType)}`;
+  return storeBaseUploadFromBuffer(inputBuffer, mimeType, originalFileName, session);
+}
+
+async function startChunkedBaseUpload(body, session) {
+  const mimeType = normalizeUploadedMimeType(body.mimeType, body.fileName);
+  const size = Number(body.size || 0);
+  if (!Number.isFinite(size) || size <= 0) {
+    throw Object.assign(new Error('上传底图大小异常。'), { statusCode: 400 });
+  }
+  if (size > MAX_UPLOAD_BYTES) {
+    throw Object.assign(new Error('上传底图不能超过 25MB。'), { statusCode: 413 });
+  }
+
+  const uploadId = randomBytes(10).toString('hex');
+  const uploadDir = resolveChunkUploadDir(uploadId);
+  await mkdir(uploadDir, { recursive: true });
+  await writeFile(path.join(uploadDir, 'meta.json'), JSON.stringify({
+    createdAt: new Date().toISOString(),
+    fileName: decodeHeaderValue(body.fileName) || `upload-${Date.now()}${extensionForImageMimeType(mimeType)}`,
+    id: uploadId,
+    mimeType,
+    ownerUserId: session?.userId || '',
+    ownerUsername: session?.username || '',
+    size,
+  }, null, 2));
+
+  return {
+    chunkSize: UPLOAD_CHUNK_BYTES,
+    uploadId,
+  };
+}
+
+async function saveBaseUploadChunk(chunkUploadId, body, session) {
+  const meta = await readChunkUploadMeta(chunkUploadId, session);
+  const index = normalizeChunkIndex(body.index);
+  const total = normalizeChunkTotal(body.total);
+  const encodedChunk = String(body.data || '').trim();
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encodedChunk)) {
+    throw Object.assign(new Error('上传分片格式不正确。'), { statusCode: 400 });
+  }
+  const chunk = Buffer.from(encodedChunk, 'base64');
+  if (!chunk.length) {
+    throw Object.assign(new Error('上传分片内容为空。'), { statusCode: 400 });
+  }
+  if (chunk.length > UPLOAD_CHUNK_BYTES + 1024) {
+    throw Object.assign(new Error('上传分片过大，请刷新页面后重试。'), { statusCode: 413 });
+  }
+  if (index >= total) {
+    throw Object.assign(new Error('上传分片序号不正确。'), { statusCode: 400 });
+  }
+  const expectedTotal = Math.ceil(Number(meta.size || 0) / UPLOAD_CHUNK_BYTES);
+  if (total !== expectedTotal) {
+    throw Object.assign(new Error('上传分片数量不正确，请重新选择图片。'), { statusCode: 400 });
+  }
+
+  await writeFile(path.join(resolveChunkUploadDir(chunkUploadId), `${String(index).padStart(6, '0')}.part`), chunk);
+  return {
+    index,
+    received: true,
+    total,
+  };
+}
+
+async function completeChunkedBaseUpload(chunkUploadId, body, session) {
+  const meta = await readChunkUploadMeta(chunkUploadId, session);
+  const total = normalizeChunkTotal(body.total);
+  const expectedTotal = Math.ceil(Number(meta.size || 0) / UPLOAD_CHUNK_BYTES);
+  if (total !== expectedTotal) {
+    throw Object.assign(new Error('上传分片数量不正确，请重新选择图片。'), { statusCode: 400 });
+  }
+
+  const chunks = [];
+  for (let index = 0; index < total; index += 1) {
+    try {
+      chunks.push(await readFile(path.join(resolveChunkUploadDir(chunkUploadId), `${String(index).padStart(6, '0')}.part`)));
+    } catch {
+      throw Object.assign(new Error('上传分片不完整，请重新选择图片。'), { statusCode: 400 });
+    }
+  }
+
+  const inputBuffer = Buffer.concat(chunks);
+  if (inputBuffer.length !== Number(meta.size || 0)) {
+    throw Object.assign(new Error('上传图片大小校验失败，请重新选择图片。'), { statusCode: 400 });
+  }
+
+  try {
+    const upload = await storeBaseUploadFromBuffer(inputBuffer, meta.mimeType, meta.fileName, session);
+    await rm(resolveChunkUploadDir(chunkUploadId), { force: true, recursive: true });
+    return upload;
+  } catch (error) {
+    await rm(resolveChunkUploadDir(chunkUploadId), { force: true, recursive: true });
+    throw error;
+  }
+}
+
+async function storeBaseUploadFromBuffer(inputBuffer, mimeType, originalFileName, session) {
   let fileBuffer = inputBuffer;
   let fileMimeType = mimeType;
   let fileName = path.basename(originalFileName);
@@ -824,6 +944,51 @@ async function createBaseUpload(request, session) {
     size: fileBuffer.length,
   });
   return sanitizeUpload(upload);
+}
+
+function resolveChunkUploadDir(chunkUploadId) {
+  const uploadId = String(chunkUploadId || '').trim();
+  if (!/^[a-f0-9]{20}$/i.test(uploadId)) {
+    throw Object.assign(new Error('上传分片不存在，请重新选择图片。'), { statusCode: 404 });
+  }
+  return path.join(UPLOAD_CHUNK_DIR, uploadId.toLowerCase());
+}
+
+async function readChunkUploadMeta(chunkUploadId, session) {
+  try {
+    const meta = JSON.parse(await readFile(path.join(resolveChunkUploadDir(chunkUploadId), 'meta.json'), 'utf8'));
+    if (!canAccessOwnedItem(meta, session)) {
+      throw Object.assign(new Error('上传分片不存在，请重新选择图片。'), { statusCode: 404 });
+    }
+    return {
+      fileName: String(meta.fileName || ''),
+      id: String(meta.id || ''),
+      mimeType: normalizeUploadedMimeType(meta.mimeType, meta.fileName),
+      ownerUserId: String(meta.ownerUserId || ''),
+      ownerUsername: String(meta.ownerUsername || ''),
+      size: Number(meta.size || 0),
+    };
+  } catch (error) {
+    if (error.statusCode) throw error;
+    throw Object.assign(new Error('上传分片不存在，请重新选择图片。'), { statusCode: 404 });
+  }
+}
+
+function normalizeChunkIndex(value) {
+  const index = Number(value);
+  if (!Number.isInteger(index) || index < 0) {
+    throw Object.assign(new Error('上传分片序号不正确。'), { statusCode: 400 });
+  }
+  return index;
+}
+
+function normalizeChunkTotal(value) {
+  const total = Number(value);
+  const maxTotal = Math.ceil(MAX_UPLOAD_BYTES / UPLOAD_CHUNK_BYTES);
+  if (!Number.isInteger(total) || total < 1 || total > maxTotal) {
+    throw Object.assign(new Error('上传分片数量不正确，请重新选择图片。'), { statusCode: 400 });
+  }
+  return total;
 }
 
 async function rememberBaseUpload(upload) {

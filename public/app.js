@@ -605,6 +605,7 @@ async function prepareUploadedImage(file, mimeType) {
 async function readOriginalImageFile(file, mimeType) {
   return {
     blob: file,
+    chunked: isHeicMimeType(mimeType),
     fileName: normalizeUploadFileName(file.name, extensionForMimeType(mimeType)),
     mimeType,
   };
@@ -630,6 +631,8 @@ async function convertImageFileToJpeg(file) {
 }
 
 async function uploadBaseImage(image) {
+  if (image.chunked) return uploadBaseImageInChunks(image);
+
   return fetchJson('/api/uploads', {
     method: 'POST',
     headers: {
@@ -637,6 +640,51 @@ async function uploadBaseImage(image) {
       'X-File-Name': encodeURIComponent(image.fileName || `upload-${Date.now()}`),
     },
     body: image.blob,
+  });
+}
+
+async function uploadBaseImageInChunks(image) {
+  const start = await fetchJson('/api/uploads/chunk/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      fileName: image.fileName,
+      mimeType: image.mimeType,
+      size: image.blob.size,
+    }),
+  });
+
+  const chunkSize = Number(start.chunkSize || 384 * 1024);
+  const total = Math.ceil(image.blob.size / chunkSize);
+  for (let index = 0; index < total; index += 1) {
+    const offset = index * chunkSize;
+    const chunk = image.blob.slice(offset, Math.min(offset + chunkSize, image.blob.size));
+    showStatus(`正在上传 HEIC 底图 ${index + 1}/${total}...`, '');
+    await fetchJson(`/api/uploads/chunk/${encodeURIComponent(start.uploadId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        data: await blobToBase64(chunk),
+        index,
+        total,
+      }),
+    });
+  }
+
+  showStatus('正在转换 HEIC 底图...', '');
+  return fetchJson(`/api/uploads/chunk/${encodeURIComponent(start.uploadId)}/complete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ total }),
+  });
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || '').split(',')[1] || '');
+    reader.onerror = () => reject(new Error('读取上传分片失败。'));
+    reader.readAsDataURL(blob);
   });
 }
 
@@ -956,7 +1004,7 @@ function showLoginStatus(message, type) {
 
 function formatVersionLabel(info) {
   const app = info?.version || info?.appVersion || 'personal-v0.1.0';
-  const web = info?.webVersion || 'web-v0.1.1';
+  const web = info?.webVersion || 'web-v0.1.2';
   return `${app} · ${web}`;
 }
 
@@ -977,6 +1025,10 @@ function canCustomizeApi() {
 
 function countPromptCharacters(value) {
   return Array.from(String(value || '').replace(/\s/g, '')).length;
+}
+
+function isHeicMimeType(mimeType) {
+  return mimeType === 'image/heic' || mimeType === 'image/heif';
 }
 
 function formatJobStatus(status) {
