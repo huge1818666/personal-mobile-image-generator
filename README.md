@@ -43,7 +43,7 @@ GitHub 镜像发布后，可以直接使用：
 docker pull ghcr.io/huge1818666/personal-mobile-image-generator:latest
 ```
 
-GitHub Actions 也会同时发布带网页版本号的镜像标签和离线包文件名，例如 `web-v0.1.4`，方便确认爱快里导入的是哪一版。
+GitHub Actions 也会同时发布带网页版本号的镜像标签和离线包文件名，例如 `web-v0.1.5`，方便确认爱快里导入的是哪一版。
 
 如果爱快支持 Compose，可以参考：
 

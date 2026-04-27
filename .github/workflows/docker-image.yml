@@ -56,7 +56,6 @@ jobs:
             --output "type=docker,dest=/tmp/${ARCHIVE_NAME}" \
             .
           gzip -9 "/tmp/${ARCHIVE_NAME}"
-          cp "/tmp/${ARCHIVE_NAME}.gz" /tmp/personal-mobile-image-generator-amd64.tar.gz
           echo "OFFLINE_ARCHIVE=/tmp/${ARCHIVE_NAME}.gz" >> "$GITHUB_ENV"
 
       - name: Publish offline download
@@ -66,4 +65,4 @@ jobs:
           gh release view offline-latest >/dev/null 2>&1 || gh release create offline-latest \
             --title "Offline Docker image" \
             --notes "离线 Docker 镜像包。下载后可用 docker load 导入。"
-          gh release upload offline-latest "$OFFLINE_ARCHIVE" /tmp/personal-mobile-image-generator-amd64.tar.gz --clobber
+          gh release upload offline-latest "$OFFLINE_ARCHIVE" --clobber
