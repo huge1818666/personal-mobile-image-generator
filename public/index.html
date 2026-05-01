@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>个人图片生成手机版</title>
-  <link rel="stylesheet" href="/styles.css?v=web-v0.1.6">
+  <link rel="stylesheet" href="/styles.css?v=web-v0.1.7">
 </head>
 <body>
   <main id="loginView" class="login-view" hidden>
@@ -38,7 +38,7 @@
 
     <section class="identity-strip">
       <span id="currentUser">-</span>
-      <span id="appVersion">personal-v0.1.0 · web-v0.1.6</span>
+      <span id="appVersion">personal-v0.1.0 · web-v0.1.7</span>
     </section>
 
     <form id="generateForm" class="panel composer">
@@ -102,18 +102,6 @@
             <span>压缩</span>
             <input id="outputCompression" type="number" min="0" max="100" step="1" value="100">
           </label>
-          <label data-admin-api-setting>
-            <span>API Key</span>
-            <input id="apiKey" type="password" autocomplete="off" placeholder="留空则使用环境变量">
-          </label>
-          <label data-admin-api-setting>
-            <span>接口地址</span>
-            <input id="baseUrl" type="url" value="https://newapi.768696.xyz">
-          </label>
-          <label data-admin-api-setting>
-            <span>模型</span>
-            <input id="model" type="text" value="gpt-image-2">
-          </label>
         </div>
       </details>
 
@@ -166,6 +154,40 @@
     <section id="adminPanel" class="panel admin-section" hidden>
       <div class="section-head">
         <div>
+          <h2>接口配置</h2>
+          <p>所有用户生成图片都使用这里的配置，保存后立即生效。</p>
+        </div>
+      </div>
+
+      <form id="apiSettingsForm" class="user-form">
+        <label>
+          <span>API Key</span>
+          <input id="apiKey" type="password" autocomplete="off" placeholder="留空保留当前 Key">
+        </label>
+        <label>
+          <span>接口地址</span>
+          <input id="baseUrl" type="url" required>
+        </label>
+        <div class="user-form-row">
+          <label>
+            <span>模型</span>
+            <input id="model" type="text" required>
+          </label>
+          <label>
+            <span>默认比例</span>
+            <select id="adminDefaultSize"></select>
+          </label>
+        </div>
+        <label class="switch-row">
+          <input id="clearApiKey" type="checkbox">
+          <span>清空当前 API Key</span>
+        </label>
+        <button id="saveApiSettingsButton" type="submit">保存接口配置</button>
+        <p id="apiSettingsStatus" class="notice" hidden></p>
+      </form>
+
+      <div class="section-head">
+        <div>
           <h2>用户管理</h2>
           <p>管理员可以新增和修改用户账号。</p>
         </div>
@@ -207,6 +229,6 @@
     </section>
   </main>
 
-  <script type="module" src="/app.js?v=web-v0.1.6"></script>
+  <script type="module" src="/app.js?v=web-v0.1.7"></script>
 </body>
 </html>

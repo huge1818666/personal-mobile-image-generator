@@ -7,9 +7,6 @@ RUN npm ci --omit=dev
 COPY server.mjs image-api.mjs ./
 COPY public ./public
 
-ENV HOST=0.0.0.0
-ENV PORT=4273
-ENV DATA_DIR=/data
 EXPOSE 4273
 VOLUME ["/data"]
 

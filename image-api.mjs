@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -5,13 +6,13 @@ import { fileURLToPath } from 'node:url';
 export const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const PROJECT_DIR = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
-  : APP_DIR;
+  : existsSync('/.dockerenv') && existsSync('/data') ? '/data' : APP_DIR;
 
 export const DEFAULT_CONFIG = Object.freeze({
-  NEWAPI_BASE_URL: process.env.NEWAPI_BASE_URL || 'https://newapi.768696.xyz',
-  NEWAPI_API_KEY: process.env.NEWAPI_API_KEY || '在这里填写你的key',
-  IMAGE_MODEL: process.env.IMAGE_MODEL || 'gpt-image-2',
-  IMAGE_SIZE: process.env.IMAGE_SIZE || 'auto',
+  NEWAPI_BASE_URL: 'https://newapi.768696.xyz',
+  NEWAPI_API_KEY: '',
+  IMAGE_MODEL: 'gpt-image-2',
+  IMAGE_SIZE: 'auto',
   IMAGE_QUALITY: process.env.IMAGE_QUALITY || '',
   IMAGE_OUTPUT_FORMAT: process.env.IMAGE_OUTPUT_FORMAT || 'png',
   IMAGE_OUTPUT_COMPRESSION: process.env.IMAGE_OUTPUT_COMPRESSION || '100',
@@ -126,7 +127,7 @@ export async function generateImage(options = {}) {
 
   const apiKey = normalizeApiKey(options.apiKey || DEFAULT_CONFIG.NEWAPI_API_KEY);
   if (isPlaceholderApiKey(apiKey)) {
-    throw new ImageGenerationError('未配置 API Key。请在页面填写 API Key，或设置 NEWAPI_API_KEY 环境变量。', {
+    throw new ImageGenerationError('未配置 API Key。请让管理员在后台配置图片接口。', {
       statusCode: 400,
     });
   }
@@ -216,7 +217,7 @@ export async function editImage(options = {}) {
 
   const apiKey = normalizeApiKey(options.apiKey || DEFAULT_CONFIG.NEWAPI_API_KEY);
   if (isPlaceholderApiKey(apiKey)) {
-    throw new ImageGenerationError('未配置 API Key。请在页面填写 API Key，或设置 NEWAPI_API_KEY 环境变量。', {
+    throw new ImageGenerationError('未配置 API Key。请让管理员在后台配置图片接口。', {
       statusCode: 400,
     });
   }

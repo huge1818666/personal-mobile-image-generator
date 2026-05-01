@@ -6,14 +6,7 @@ services:
     ports:
       - "4273:4273"
     environment:
-      HOST: 0.0.0.0
-      PORT: 4273
-      DATA_DIR: /data
       APP_USERNAME: personal
       APP_PASSWORD: personal123456
-      NEWAPI_BASE_URL: https://newapi.768696.xyz
-      NEWAPI_API_KEY: 在这里填写你的key
-      IMAGE_MODEL: gpt-image-2
-      IMAGE_SIZE: auto
     volumes:
       - ./data:/data

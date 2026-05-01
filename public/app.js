@@ -20,9 +20,14 @@ const sizeOptions = document.querySelector('#sizeOptions');
 const qualityInput = document.querySelector('#quality');
 const outputFormatInput = document.querySelector('#outputFormat');
 const outputCompressionInput = document.querySelector('#outputCompression');
+const apiSettingsForm = document.querySelector('#apiSettingsForm');
 const apiKeyInput = document.querySelector('#apiKey');
 const baseUrlInput = document.querySelector('#baseUrl');
 const modelInput = document.querySelector('#model');
+const adminDefaultSizeInput = document.querySelector('#adminDefaultSize');
+const clearApiKeyInput = document.querySelector('#clearApiKey');
+const saveApiSettingsButton = document.querySelector('#saveApiSettingsButton');
+const apiSettingsStatus = document.querySelector('#apiSettingsStatus');
 const statusBox = document.querySelector('#statusBox');
 const generateButton = document.querySelector('#generateButton');
 const costNote = document.querySelector('#costNote');
@@ -47,7 +52,6 @@ const cancelUserEditButton = document.querySelector('#cancelUserEditButton');
 const saveUserButton = document.querySelector('#saveUserButton');
 const userStatus = document.querySelector('#userStatus');
 const userList = document.querySelector('#userList');
-const adminApiSettings = [...document.querySelectorAll('[data-admin-api-setting]')];
 
 const settingsKey = 'personal-mobile-image-settings-v2';
 const legacySettingsKey = 'personal-mobile-image-settings-v1';
@@ -149,16 +153,9 @@ async function loadConfig() {
   estimatedCostCny = Number(defaults.estimatedCostCny || 0.2);
   appVersion.textContent = formatVersionLabel(defaults) || appVersion.textContent;
   costNote.textContent = `预计消耗 ${formatMoney(estimatedCostCny)} 元`;
-  const systemSettings = defaults.systemSettings || {};
-  if (canCustomizeApi()) {
-    baseUrlInput.value = systemSettings.baseUrl || baseUrlInput.value;
-    modelInput.value = systemSettings.model || modelInput.value;
-  } else {
-    apiKeyInput.value = '';
-    baseUrlInput.value = '';
-    modelInput.value = '';
-  }
   renderSizeOptions(defaults.sizes || []);
+  renderAdminDefaultSizeOptions(defaults.sizes || []);
+  applyAdminImageSettings(defaults.imageSettings || {});
   renderPromptExamples(fallbackExamples);
   loadSettings();
   updateOutputCompressionState();
@@ -167,6 +164,29 @@ async function loadConfig() {
 }
 
 function renderSizeOptions(sizes) {
+  const normalized = getSizeOptionList(sizes);
+
+  sizeOptions.innerHTML = normalized.map((size) => `
+    <button type="button" data-size="${escapeAttribute(size.value)}">${escapeHtml(size.label)}</button>
+  `).join('');
+
+  sizeOptions.querySelectorAll('[data-size]').forEach((button) => {
+    button.addEventListener('click', () => {
+      selectedSize = button.dataset.size || 'auto';
+      updateSizeButtons();
+      saveSettings();
+    });
+  });
+}
+
+function renderAdminDefaultSizeOptions(sizes) {
+  const normalized = getSizeOptionList(sizes);
+  adminDefaultSizeInput.innerHTML = normalized.map((size) => `
+    <option value="${escapeAttribute(size.value)}">${escapeHtml(size.label)}</option>
+  `).join('');
+}
+
+function getSizeOptionList(sizes) {
   const fallbackSizes = [
     { label: '竖图', value: '1024x1536' },
     { label: '方图', value: '1024x1024' },
@@ -180,18 +200,7 @@ function renderSizeOptions(sizes) {
   ].filter((size, index, all) => (
     size.value && all.findIndex((item) => item.value === size.value) === index
   )).sort((a, b) => rankSize(a.value, preferred) - rankSize(b.value, preferred));
-
-  sizeOptions.innerHTML = normalized.map((size) => `
-    <button type="button" data-size="${escapeAttribute(size.value)}">${escapeHtml(size.label)}</button>
-  `).join('');
-
-  sizeOptions.querySelectorAll('[data-size]').forEach((button) => {
-    button.addEventListener('click', () => {
-      selectedSize = button.dataset.size || 'auto';
-      updateSizeButtons();
-      saveSettings();
-    });
-  });
+  return normalized;
 }
 
 function rankSize(value, preferred) {
@@ -224,6 +233,22 @@ function renderPromptExamples(examples) {
   });
 }
 
+function applyAdminImageSettings(imageSettings = {}) {
+  if (!isAdminSession()) {
+    apiKeyInput.value = '';
+    baseUrlInput.value = '';
+    modelInput.value = '';
+    clearApiKeyInput.checked = false;
+    return;
+  }
+  apiKeyInput.value = '';
+  apiKeyInput.placeholder = imageSettings.hasApiKey ? '留空保留当前 Key' : '请输入 API Key';
+  baseUrlInput.value = imageSettings.baseUrl || '';
+  modelInput.value = imageSettings.model || '';
+  adminDefaultSizeInput.value = imageSettings.size || defaults?.size || 'auto';
+  clearApiKeyInput.checked = false;
+}
+
 function loadSettings() {
   const saved = readSettings();
   promptInput.value = saved.prompt || promptInput.value;
@@ -231,10 +256,6 @@ function loadSettings() {
   qualityInput.value = saved.quality || defaults.quality || 'default';
   outputFormatInput.value = saved.outputFormat || defaults.outputFormat || 'png';
   outputCompressionInput.value = saved.outputCompression ?? defaults.outputCompression ?? '100';
-  if (canCustomizeApi()) {
-    baseUrlInput.value = saved.baseUrl || baseUrlInput.value;
-    modelInput.value = saved.model || modelInput.value;
-  }
   updateSizeButtons();
 }
 
@@ -257,18 +278,11 @@ function saveSettings() {
     quality: qualityInput.value,
     size: selectedSize,
   };
-  if (canCustomizeApi()) {
-    settings.baseUrl = baseUrlInput.value.trim();
-    settings.model = modelInput.value.trim();
-  }
   localStorage.setItem(settingsKey, JSON.stringify(settings));
 }
 
 function updateAdminVisibility() {
   const admin = isAdminSession();
-  adminApiSettings.forEach((element) => {
-    element.hidden = !admin;
-  });
   adminPanel.hidden = !admin;
   if (admin && !managedUserIdInput.value) resetUserForm();
   if (!admin) {
@@ -338,11 +352,6 @@ generateForm.addEventListener('submit', async (event) => {
       quality: qualityInput.value,
       size: selectedSize,
     };
-    if (canCustomizeApi()) {
-      payload.apiKey = apiKeyInput.value.trim();
-      payload.baseUrl = baseUrlInput.value.trim();
-      payload.model = modelInput.value.trim();
-    }
     if (isEditing) Object.assign(payload, serializeBaseImages());
     const result = await fetchJson(isEditing ? '/api/edit' : '/api/generate', {
       method: 'POST',
@@ -401,8 +410,6 @@ outputFormatInput.addEventListener('change', () => {
   updateOutputCompressionState();
   saveSettings();
 });
-baseUrlInput.addEventListener('input', saveSettings);
-modelInput.addEventListener('input', saveSettings);
 
 useResultAsBaseButton.addEventListener('click', () => {
   if (!currentResult) return;
@@ -414,6 +421,40 @@ useResultAsBaseButton.addEventListener('click', () => {
 refreshJobsButton.addEventListener('click', () => refreshJobs().catch((error) => showStatus(error.message, 'error')));
 refreshImagesButton.addEventListener('click', () => refreshImages().catch((error) => showStatus(error.message, 'error')));
 refreshUsersButton.addEventListener('click', () => refreshUsers().catch((error) => showUserStatus(error.message, 'error')));
+
+apiSettingsForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!canManageApiSettings()) return;
+
+  saveApiSettingsButton.disabled = true;
+  showApiSettingsStatus('正在保存接口配置...', '');
+  try {
+    const payload = {
+      apiKey: apiKeyInput.value.trim(),
+      baseUrl: baseUrlInput.value.trim(),
+      clearApiKey: clearApiKeyInput.checked,
+      model: modelInput.value.trim(),
+      size: adminDefaultSizeInput.value || 'auto',
+    };
+    const result = await fetchJson('/api/admin/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    defaults = {
+      ...defaults,
+      hasApiKey: Boolean(result.imageSettings?.hasApiKey),
+      imageSettings: result.imageSettings,
+      size: result.imageSettings?.size || defaults.size || 'auto',
+    };
+    applyAdminImageSettings(result.imageSettings || {});
+    showApiSettingsStatus('接口配置已保存，新任务会立即使用。', 'success');
+  } catch (error) {
+    showApiSettingsStatus(error.message, 'error');
+  } finally {
+    saveApiSettingsButton.disabled = false;
+  }
+});
 
 cancelUserEditButton.addEventListener('click', () => {
   resetUserForm();
@@ -894,7 +935,7 @@ async function refreshImages() {
         <img src="${escapeAttribute(image.imageUrl)}?t=${encodeURIComponent(image.modifiedAt || '')}" alt="生成图片">
       </a>
       <div>
-        <span>${formatBytes(image.size)} · ${formatDateTime(image.modifiedAt)}</span>
+        <span>${image.ownerUsername ? `${escapeHtml(image.ownerUsername)} · ` : ''}${formatBytes(image.size)} · ${formatDateTime(image.modifiedAt)}</span>
         <button type="button" class="soft-button small" data-history-base="${escapeAttribute(image.fileName)}" data-image-url="${escapeAttribute(image.imageUrl)}">作底图</button>
       </div>
     </article>
@@ -1026,8 +1067,15 @@ function showLoginStatus(message, type) {
 
 function formatVersionLabel(info) {
   const app = info?.version || info?.appVersion || 'personal-v0.1.0';
-  const web = info?.webVersion || 'web-v0.1.6';
+  const web = info?.webVersion || 'web-v0.1.7';
   return `${app} · ${web}`;
+}
+
+function showApiSettingsStatus(message, type) {
+  const text = String(message || '').trim();
+  apiSettingsStatus.className = `notice ${type || ''}`.trim();
+  apiSettingsStatus.textContent = text;
+  apiSettingsStatus.hidden = !text;
 }
 
 function showUserStatus(message, type) {
@@ -1041,8 +1089,8 @@ function isAdminSession() {
   return currentSession?.role === 'admin';
 }
 
-function canCustomizeApi() {
-  return Boolean(defaults?.canCustomizeApi && isAdminSession());
+function canManageApiSettings() {
+  return Boolean(defaults?.canManageApiSettings && isAdminSession());
 }
 
 function countPromptCharacters(value) {

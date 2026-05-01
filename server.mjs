@@ -6,12 +6,16 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  assertHeaderSafeApiKey,
   DEFAULT_CONFIG,
   editImage,
   generateImage,
   IMAGE_COST_CNY,
   IMAGE_SIZE_OPTIONS,
   isPlaceholderApiKey,
+  normalizeApiKey,
+  normalizeBaseUrl,
+  normalizeSize,
   PROJECT_DIR,
 } from './image-api.mjs';
 
@@ -37,7 +41,13 @@ const MAX_JOBS = 30;
 const MAX_UPLOADS = 80;
 const MAX_CONCURRENT_JOBS = clampInteger(process.env.IMAGE_MAX_CONCURRENT_JOBS, 1, 1, 4);
 const APP_VERSION = 'personal-v0.1.0';
-const WEB_VERSION = 'web-v0.1.6';
+const WEB_VERSION = 'web-v0.1.7';
+const DEFAULT_IMAGE_API_SETTINGS = Object.freeze({
+  apiKey: '',
+  baseUrl: DEFAULT_CONFIG.NEWAPI_BASE_URL,
+  model: DEFAULT_CONFIG.IMAGE_MODEL,
+  size: DEFAULT_CONFIG.IMAGE_SIZE,
+});
 
 const sessions = new Map();
 const pendingJobOptions = new Map();
@@ -103,26 +113,26 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === 'GET' && requestUrl.pathname === '/api/config') {
+      const data = await readData();
+      const imageSettings = getImageApiSettings(data);
+      const admin = isAdminSession(session);
       const config = {
         appVersion: APP_VERSION,
-        canCustomizeApi: isAdminSession(session),
-        canManageUsers: isAdminSession(session),
+        canManageApiSettings: admin,
+        canManageUsers: admin,
         estimatedCostCny: IMAGE_COST_CNY,
-        hasEnvApiKey: !isPlaceholderApiKey(DEFAULT_CONFIG.NEWAPI_API_KEY),
+        hasApiKey: !isPlaceholderApiKey(imageSettings.apiKey),
         maxBaseImages: MAX_BASE_IMAGES,
         maxImages: MAX_IMAGES,
         outputCompression: DEFAULT_CONFIG.IMAGE_OUTPUT_COMPRESSION,
         outputFormat: DEFAULT_CONFIG.IMAGE_OUTPUT_FORMAT,
         quality: DEFAULT_CONFIG.IMAGE_QUALITY || 'default',
-        size: DEFAULT_CONFIG.IMAGE_SIZE,
+        size: imageSettings.size,
         sizes: IMAGE_SIZE_OPTIONS,
         webVersion: WEB_VERSION,
       };
-      if (isAdminSession(session)) {
-        config.systemSettings = {
-          baseUrl: DEFAULT_CONFIG.NEWAPI_BASE_URL,
-          model: DEFAULT_CONFIG.IMAGE_MODEL,
-        };
+      if (admin) {
+        config.imageSettings = sanitizeImageApiSettings(imageSettings);
       }
       return sendJson(response, 200, config);
     }
@@ -144,7 +154,9 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === 'GET' && requestUrl.pathname === '/api/images') {
       const data = await readData();
-      return sendJson(response, 200, { images: getVisibleImages(data.images, session).slice(0, MAX_IMAGES) });
+      return sendJson(response, 200, {
+        images: getVisibleImages(data.images, session).map((image) => sanitizeImage(image, session)).slice(0, MAX_IMAGES),
+      });
     }
 
     if (request.method === 'POST' && requestUrl.pathname === '/api/uploads') {
@@ -196,57 +208,57 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === 'POST' && requestUrl.pathname === '/api/generate') {
       const body = await readJson(request);
-      assertImageSettingsAvailable(session, body);
+      const requestOptions = await getImageRequestOptions();
       const job = await createImageJob({
         baseImages: [],
         mode: 'generate',
-        options: getImageRequestOptions(body, session),
+        options: requestOptions,
         outputCompression: body.outputCompression,
         outputFormat: body.outputFormat,
         prompt: body.prompt,
         quality: body.quality,
-        size: body.size,
+        size: body.size || requestOptions.size,
         owner: session,
       });
       enqueueJob(job.id, {
         baseImages: [],
         mode: 'generate',
-        options: getImageRequestOptions(body, session),
+        options: requestOptions,
         outputCompression: body.outputCompression,
         outputFormat: body.outputFormat,
         owner: getJobOwner(session),
         prompt: body.prompt,
         quality: body.quality,
-        size: body.size,
+        size: body.size || requestOptions.size,
       });
       return sendJson(response, 202, { job: sanitizeJob(job, session), jobId: job.id });
     }
 
     if (request.method === 'POST' && requestUrl.pathname === '/api/edit') {
       const body = await readJson(request);
-      assertImageSettingsAvailable(session, body);
+      const requestOptions = await getImageRequestOptions();
       const baseImages = await readBaseImagesFromRequest(body, session);
       const job = await createImageJob({
         baseImages,
         mode: 'edit',
-        options: getImageRequestOptions(body, session),
+        options: requestOptions,
         outputCompression: body.outputCompression,
         outputFormat: body.outputFormat,
         prompt: body.prompt,
         quality: body.quality,
-        size: body.size,
+        size: body.size || requestOptions.size,
         owner: session,
       });
       enqueueJob(job.id, {
         baseImages,
         mode: 'edit',
-        options: getImageRequestOptions(body, session),
+        options: requestOptions,
         outputCompression: body.outputCompression,
         outputFormat: body.outputFormat,
         owner: getJobOwner(session),
         prompt: body.prompt,
         quality: body.quality,
-        size: body.size,
+        size: body.size || requestOptions.size,
       });
       return sendJson(response, 202, { job: sanitizeJob(job, session), jobId: job.id });
     }
@@ -358,6 +370,17 @@ function createSessionCookie(sessionId) {
 }
 
 async function handleAdminRequest(request, response, requestUrl) {
+  if (request.method === 'GET' && requestUrl.pathname === '/api/admin/settings') {
+    const data = await readData();
+    return sendJson(response, 200, { imageSettings: sanitizeImageApiSettings(getImageApiSettings(data)) });
+  }
+
+  if (request.method === 'PUT' && requestUrl.pathname === '/api/admin/settings') {
+    const body = await readJson(request);
+    const imageSettings = await updateImageApiSettings(body);
+    return sendJson(response, 200, { imageSettings: sanitizeImageApiSettings(imageSettings) });
+  }
+
   if (request.method === 'GET' && requestUrl.pathname === '/api/admin/users') {
     const data = await readData();
     return sendJson(response, 200, { users: getAdminUserList(data.users) });
@@ -405,22 +428,101 @@ async function authenticateUser(username, password) {
   };
 }
 
-function getImageRequestOptions(body, session) {
-  if (!isAdminSession(session)) return {};
+async function getImageRequestOptions() {
+  const data = await readData();
+  const imageSettings = getImageApiSettings(data);
+  if (isPlaceholderApiKey(imageSettings.apiKey)) {
+    throw Object.assign(new Error('当前未配置图片 API Key，请管理员先在后台保存接口配置。'), { statusCode: 400 });
+  }
   return {
-    apiKey: body.apiKey,
-    baseUrl: body.baseUrl,
-    model: body.model,
+    apiKey: imageSettings.apiKey,
+    baseUrl: imageSettings.baseUrl,
+    model: imageSettings.model,
+    size: imageSettings.size,
   };
 }
 
-function assertImageSettingsAvailable(session, body) {
-  if (isAdminSession(session)) return;
-  if (body.apiKey || body.baseUrl || body.model) {
-    throw Object.assign(new Error('普通用户不能自定义图片接口参数，请联系管理员配置后再使用。'), { statusCode: 403 });
+async function updateImageApiSettings(body) {
+  return mutateData(async (data) => {
+    const current = getImageApiSettings(data);
+    const next = {
+      ...current,
+      baseUrl: normalizeImageBaseUrl(body.baseUrl || current.baseUrl),
+      model: normalizeImageModel(body.model || current.model),
+      size: normalizeImageSize(body.size || current.size),
+    };
+
+    if (body.clearApiKey === true) {
+      next.apiKey = '';
+    } else if (Object.prototype.hasOwnProperty.call(body, 'apiKey')) {
+      const apiKey = normalizeApiKey(body.apiKey);
+      if (apiKey) {
+        assertHeaderSafeApiKey(apiKey);
+        next.apiKey = apiKey;
+      }
+    }
+
+    data.settings = normalizeSettings(data.settings);
+    data.settings.imageApi = next;
+    return next;
+  });
+}
+
+function normalizeSettings(settings = {}) {
+  return {
+    imageApi: normalizeImageApiSettings(settings.imageApi || {}),
+  };
+}
+
+function getImageApiSettings(data) {
+  data.settings = normalizeSettings(data.settings);
+  return data.settings.imageApi;
+}
+
+function normalizeImageApiSettings(settings = {}) {
+  return {
+    apiKey: normalizeApiKey(settings.apiKey || ''),
+    baseUrl: normalizeImageBaseUrl(settings.baseUrl || DEFAULT_IMAGE_API_SETTINGS.baseUrl),
+    model: normalizeImageModel(settings.model || DEFAULT_IMAGE_API_SETTINGS.model),
+    size: normalizeImageSize(settings.size || DEFAULT_IMAGE_API_SETTINGS.size),
+  };
+}
+
+function sanitizeImageApiSettings(settings = {}) {
+  const normalized = normalizeImageApiSettings(settings);
+  return {
+    baseUrl: normalized.baseUrl,
+    hasApiKey: !isPlaceholderApiKey(normalized.apiKey),
+    model: normalized.model,
+    size: normalized.size,
+  };
+}
+
+function normalizeImageBaseUrl(value) {
+  try {
+    return normalizeBaseUrl(value || DEFAULT_IMAGE_API_SETTINGS.baseUrl);
+  } catch {
+    throw Object.assign(new Error('接口地址格式不正确，请填写完整的 http(s) 地址。'), { statusCode: 400 });
   }
-  if (!isPlaceholderApiKey(DEFAULT_CONFIG.NEWAPI_API_KEY)) return;
-  throw Object.assign(new Error('当前未配置图片 API Key，请联系管理员设置环境变量后再使用。'), { statusCode: 400 });
+}
+
+function normalizeImageModel(value) {
+  const model = String(value || '').trim();
+  if (model.length < 2 || model.length > 100) {
+    throw Object.assign(new Error('模型名称长度需要在 2-100 个字符之间。'), { statusCode: 400 });
+  }
+  if (/[\u0000-\u001f\u007f]/.test(model)) {
+    throw Object.assign(new Error('模型名称不能包含控制字符。'), { statusCode: 400 });
+  }
+  return model;
+}
+
+function normalizeImageSize(value) {
+  try {
+    return normalizeSize(value || DEFAULT_IMAGE_API_SETTINGS.size);
+  } catch {
+    throw Object.assign(new Error('默认比例必须是 auto 或 1024x1024 这种尺寸格式。'), { statusCode: 400 });
+  }
 }
 
 async function createManagedUser(body) {
@@ -786,6 +888,18 @@ function sanitizeJobResult(result, admin) {
     sanitized.outputPath = result.outputPath || '';
   }
   return sanitized;
+}
+
+function sanitizeImage(image, session) {
+  const admin = isAdminSession(session);
+  return {
+    fileName: String(image.fileName || ''),
+    imageUrl: String(image.imageUrl || ''),
+    modifiedAt: image.modifiedAt || '',
+    outputFormat: image.outputFormat || DEFAULT_CONFIG.IMAGE_OUTPUT_FORMAT,
+    ownerUsername: admin ? String(image.ownerUsername || '') : undefined,
+    size: Number(image.size || 0),
+  };
 }
 
 function getVisibleJobs(jobs, session) {
@@ -1460,6 +1574,7 @@ async function readData() {
   if (!Array.isArray(data.sessions)) data.sessions = [];
   if (!Array.isArray(data.uploads)) data.uploads = [];
   if (!Array.isArray(data.users)) data.users = [];
+  data.settings = normalizeSettings(data.settings);
   data.sessions = data.sessions
     .filter((session) => session && session.id && session.username)
     .map((session) => ({
@@ -1502,6 +1617,7 @@ async function writeData(data) {
     images: data.images.slice(0, MAX_IMAGES),
     jobs: data.jobs.slice(0, MAX_JOBS),
     sessions: data.sessions || [],
+    settings: normalizeSettings(data.settings),
     uploads: (data.uploads || []).slice(0, MAX_UPLOADS),
     users: data.users,
   }, null, 2));
