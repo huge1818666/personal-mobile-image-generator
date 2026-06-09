@@ -43,7 +43,7 @@ GitHub 镜像发布后，可以直接使用：
 docker pull ghcr.io/huge1818666/personal-mobile-image-generator:latest
 ```
 
-GitHub Actions 也会同时发布带网页版本号的镜像标签和离线包文件名，例如 `web-v0.1.7`，方便确认爱快里导入的是哪一版。
+GitHub Actions 也会同时发布带网页版本号的镜像标签和离线包文件名，例如 `web-v0.1.8`，方便确认爱快里导入的是哪一版。
 
 如果爱快支持 Compose，可以参考：
 
@@ -73,3 +73,13 @@ http://爱快IP:4273/
 - `image-api.mjs`：图片生成和底图修改 API 调用，复制自原项目并独立使用。
 - `public/`：手机网页端。
 - `.personal-data.json`：运行时会话、用户、接口配置、任务和图片记录，已加入 `.gitignore`。
+
+## Windows 便携包
+
+生成给别人直接用的 Windows zip 包：
+
+```bash
+npm run package:windows
+```
+
+打包结果会输出到 `dist/personal-mobile-image-generator-windows-网页版本.zip`。包里已经内置 Windows Node 运行时和 HEIC/HEIF 转 JPG 依赖，别人解压后双击 `启动.bat` 即可使用。

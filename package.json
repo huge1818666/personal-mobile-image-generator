@@ -4,6 +4,10 @@
   "type": "module",
   "scripts": {
     "start": "node ./server.mjs",
-    "check": "node --check ./server.mjs && node --check ./image-api.mjs && node --check ./public/app.js"
+    "check": "node --check ./server.mjs && node --check ./image-api.mjs && node --check ./public/app.js && node --check ./scripts/package-windows.mjs",
+    "package:windows": "node ./scripts/package-windows.mjs"
+  },
+  "dependencies": {
+    "heic-convert": "^2.1.0"
   }
 }

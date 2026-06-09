@@ -41,7 +41,7 @@ const MAX_JOBS = 30;
 const MAX_UPLOADS = 80;
 const MAX_CONCURRENT_JOBS = clampInteger(process.env.IMAGE_MAX_CONCURRENT_JOBS, 1, 1, 4);
 const APP_VERSION = 'personal-v0.1.0';
-const WEB_VERSION = 'web-v0.1.7';
+const WEB_VERSION = 'web-v0.1.8';
 const DEFAULT_IMAGE_API_SETTINGS = Object.freeze({
   apiKey: '',
   baseUrl: DEFAULT_CONFIG.NEWAPI_BASE_URL,
@@ -1459,7 +1459,7 @@ const HEIC_CONVERT_CHILD_SCRIPT = `
 import { createWriteStream } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { readFile, stat, unlink } from 'node:fs/promises';
+import { readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const config = JSON.parse(process.env.HEIC_CONVERT_CONFIG || '{}');
@@ -1492,18 +1492,15 @@ if (config.chunkDir) {
   }
 }
 
-const binary = process.env.HEIF_CONVERT_BINARY || 'heif-convert';
-const child = spawn(binary, ['-q', '88', inputPath, config.outputPath], {
-  stdio: ['ignore', 'ignore', 'pipe'],
-});
-let stderr = '';
-child.stderr.setEncoding('utf8');
-child.stderr.on('data', (chunk) => {
-  stderr += chunk;
-});
-const [code, signal] = await once(child, 'close');
-if (code !== 0) {
-  throw new Error(stderr.trim() || \`heif-convert 退出异常：\${signal || code}\`);
+if (process.env.HEIC_USE_JS_CONVERT === '1') {
+  await convertWithJs();
+} else {
+  try {
+    await convertWithBinary(process.env.HEIF_CONVERT_BINARY || 'heif-convert');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    await convertWithJs();
+  }
 }
 
 if (config.chunkDir) {
@@ -1511,6 +1508,38 @@ if (config.chunkDir) {
 }
 const outputStats = await stat(config.outputPath);
 process.stdout.write(JSON.stringify({ size: outputStats.size }));
+
+async function convertWithBinary(binary) {
+  const child = spawn(binary, ['-q', '88', inputPath, config.outputPath], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+  const result = await Promise.race([
+    once(child, 'error').then(([error]) => {
+      throw error;
+    }),
+    once(child, 'close'),
+  ]);
+  const [code, signal] = result;
+  if (code !== 0) {
+    throw new Error(stderr.trim() || \`heif-convert 退出异常：\${signal || code}\`);
+  }
+}
+
+async function convertWithJs() {
+  const heicConvert = (await import('heic-convert')).default;
+  const inputBuffer = await readFile(inputPath);
+  const outputBuffer = await heicConvert({
+    buffer: inputBuffer,
+    format: 'JPEG',
+    quality: 0.88,
+  });
+  await writeFile(config.outputPath, Buffer.from(outputBuffer));
+}
 `;
 
 function replaceImageExtension(fileName, extension) {
